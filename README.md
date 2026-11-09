@@ -113,5 +113,7 @@ pnpm check
 
 The tests run the committed bundle through Tyto's own harness (`testPlugin`, Tyto ADR 0150), with
 a fake ACP agent behind the host's process port (`tests/fake-agent.ts`). CI fails when
-`dist/` differs from a fresh build of `src/`. The `contract` workflow moves this repository onto
+`dist/` differs from a fresh build of `src/`. `tests/panel-theme.test.ts` renders the panel page
+in both themes and measures its contrast on pixels, in the system Chrome through `playwright-core`
+(no browser is downloaded; GitHub's Ubuntu runners carry Chrome). The `contract` workflow moves this repository onto
 each new contract (Tyto ADR 0154).

@@ -19,7 +19,14 @@
         height: 100%;
         margin: 0;
       }
+      /* Tyto paints white behind every panel page, in both themes, and hands it no theme
+         colours. "light dark" makes this page's scheme the window's (Electron answers
+         prefers-color-scheme from the theme setting), so in the dark theme the page's own
+         text is light: the page must paint the background that text was chosen for.
+         Canvas and CanvasText are the scheme's pair, so the two always go together. */
       body {
+        background: Canvas;
+        color: CanvasText;
         display: flex;
         flex-direction: column;
         font:
