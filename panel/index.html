@@ -72,6 +72,76 @@
       .agent {
         background: var(--soft);
       }
+      /* The markdown panel.js builds, in agent messages and problem boxes. */
+      .agent p,
+      .problem p {
+        margin: 0 0 6px;
+      }
+      .agent > :last-child,
+      .problem .said > :last-child {
+        margin-bottom: 0;
+      }
+      .heading {
+        font-weight: 600;
+      }
+      .heading.level-1,
+      .heading.level-2 {
+        font-size: 14px;
+      }
+      .agent ul,
+      .agent ol {
+        margin: 0 0 6px;
+        padding-left: 20px;
+        white-space: normal;
+      }
+      .agent li {
+        white-space: pre-wrap;
+      }
+      .agent blockquote {
+        margin: 0 0 6px;
+        padding-left: 8px;
+        border-left: 3px solid var(--line);
+        color: var(--muted);
+      }
+      .agent code,
+      .problem .said code {
+        font:
+          12px ui-monospace,
+          Consolas,
+          monospace;
+        padding: 0 3px;
+        border-radius: 3px;
+        background: var(--soft);
+      }
+      .problem .said code {
+        display: inline;
+        margin: 0;
+        user-select: text;
+      }
+      .agent pre {
+        margin: 0 0 6px;
+        padding: 6px 8px;
+        overflow-x: auto;
+        border-radius: 4px;
+        border: 1px solid var(--line);
+        background: Canvas;
+      }
+      .agent pre code {
+        display: block;
+        padding: 0;
+        background: none;
+        white-space: pre;
+      }
+      .agent .added {
+        color: light-dark(#116329, #7ee787);
+      }
+      .agent .removed {
+        color: light-dark(#b42318, #ff9a8f);
+      }
+      .agent .hunk,
+      .agent .address {
+        color: var(--muted);
+      }
       .earlier {
         opacity: 0.7;
       }

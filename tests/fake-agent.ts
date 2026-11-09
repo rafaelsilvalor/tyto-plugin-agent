@@ -49,6 +49,12 @@ export interface FakeAgentOptions {
   readonly window?: AgentServer | 'E_WINDOW_AGENTS_OFF';
   readonly folder?: string;
   readonly turn?: (tools: TurnTools) => Promise<string | undefined>;
+  /**
+   * The MCP servers Claude Code's `system`/`init` message lists, sent as Claude's adapter sends
+   * it: an `_claude/sdkMessage` notification when a turn starts, only to a client that asked for
+   * it in `session/new`. Absent, no init is sent at all: an agent with no such report.
+   */
+  readonly init?: readonly { readonly name: string; readonly status: string }[];
 }
 
 export interface FakeAgent {
@@ -93,6 +99,8 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
     let nextId = 1000;
     const waiting = new Map<number, (result: unknown) => void>();
     let cancel: (() => void) | undefined;
+    /** Whether `session/new` asked for Claude Code's init message, as the adapter reads it. */
+    let wantsInit = false;
 
     const say = (message: Record<string, unknown>): void => {
       if (ended) return;
@@ -135,6 +143,20 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
         cancelled,
         exit: (code) => exit(code, null),
       };
+      if (options.init !== undefined && wantsInit) {
+        say({
+          method: '_claude/sdkMessage',
+          params: {
+            sessionId: params.sessionId,
+            message: {
+              type: 'system',
+              subtype: 'init',
+              mcp_servers: options.init,
+              tools: ['Read', 'Edit'],
+            },
+          },
+        });
+      }
       const stopReason = await (options.turn ?? defaultTurn)(tools);
       if (stopReason !== undefined) say({ id, result: { stopReason } });
     }
@@ -157,6 +179,16 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
           result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] },
         });
       } else if (message.method === 'session/new') {
+        const meta = (message.params as { _meta?: { claudeCode?: Record<string, unknown> } })._meta;
+        const asked = meta?.claudeCode?.['emitRawSDKMessages'];
+        wantsInit =
+          asked === true ||
+          (Array.isArray(asked) &&
+            asked.some(
+              (filter: { type?: unknown; subtype?: unknown }) =>
+                filter.type === 'system' &&
+                (filter.subtype === undefined || filter.subtype === 'init'),
+            ));
         if (options.signedOut === true) {
           say({ id: message.id, error: { code: -32000, message: 'Authentication required' } });
         } else {

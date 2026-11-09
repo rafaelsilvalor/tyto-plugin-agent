@@ -39,6 +39,11 @@ You need, on the computer that runs Tyto:
    npm install -g @agentclientprotocol/claude-agent-acp
    ```
 
+   **Tested with `@agentclientprotocol/claude-agent-acp` 0.102.0** (Claude Code 2.1.321). The
+   panel's check that Claude has Tyto's tools reads that adapter's own extension (it forwards
+   Claude Code's startup message as `_claude/sdkMessage`); a version without it leaves the
+   panel unable to tell, and then it says nothing.
+
 Then install the plugin straight from this repository:
 
 ```
@@ -71,11 +76,24 @@ the folder open in Tyto, and the panel says what it found:
 | Claude is not signed in                   | open a terminal in Tyto, run `claude`, then `/login`, then press **New**                        |
 | the folder is restricted                  | trust the folder; Tyto starts no program in a restricted one                                    |
 | `window off (agentsListen)` in the header | the agent chats but cannot see the brief or propose edits; turn `agentsListen` on, then **New** |
+| `no Tyto tools` in the header             | see [Claude without Tyto's tools](#claude-without-tytos-tools); Tyto cannot fix it              |
 
-Type a message and press **Send** (or Ctrl+Enter). Tool calls and the agent's plan show as small
-lines; a permission the agent asks for shows its options as buttons. **Stop** cancels the running
-turn, and **New** ends the agent and starts a fresh conversation. The messages of earlier
-conversations in the same folder show above the first one, greyed.
+### Claude without Tyto's tools
+
+On the first message, the panel reads which MCP servers Claude Code started for the session. If
+the window's server, `tyto`, is not among them, Claude chats but cannot see the brief, and the
+panel says so. The usual cause is a Claude Code setting that allows only listed MCP servers
+(`allowedMcpServers`), often one your organisation manages: Claude Code then drops any other
+server without a message, in the terminal too. Ask your organisation's admin to allow the MCP
+server `tyto`. Tyto does not work around that policy. If `tyto` is listed but did not connect,
+the panel names its status, and Claude Code's MCP log for `tyto` says why.
+
+Type a message and press **Send** (or Ctrl+Enter). The agent's replies render their markdown
+(bold, lists, code and diff blocks); a link shows its address and is not followed. Tool calls
+show as small lines with the tool's name (Tyto's own as `Tyto · <what it does>`), and the
+agent's plan the same way; a permission the agent asks for shows its options as buttons.
+**Stop** cancels the running turn, and **New** ends the agent and starts a fresh conversation.
+The messages of earlier conversations in the same folder show above the first one, greyed.
 
 ### Settings
 
@@ -97,8 +115,12 @@ In `settings.json`:
   0173 decision 8), so a turn is started with one `call` and read with the next ones:
   `read {after}` answers the entries after the last one the page has, four times a second while
   a turn runs.
-- **Drivers.** `src/drivers.ts` names each agent: its program, its arguments, and the steps the
-  panel shows to install it and sign in.
+- **Drivers.** `src/drivers.ts` names each agent: its program, its arguments, the steps the
+  panel shows to install it and sign in, and how it reports the session's MCP servers, when it
+  can (Claude: `_meta.claudeCode.emitRawSDKMessages` in `session/new`, then Claude Code's
+  `system`/`init` message as `_claude/sdkMessage` on the first turn).
+- **Markdown without HTML.** `panel/panel.js` builds every node with `createElement` and
+  `textContent`, never `innerHTML`, so nothing an agent writes becomes markup.
 
 ## Develop
 

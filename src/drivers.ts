@@ -20,7 +20,57 @@ export interface Driver {
   readonly install: readonly string[];
   /** What the person runs to sign in, shown when the agent asks for authentication. */
   readonly login: readonly string[];
+  /**
+   * How this agent says which MCP servers its session ended up with, when it can. ACP has no
+   * message for it, so it is the adapter's own extension, and an agent without one is never
+   * checked (Tyto's tools may be missing, and the panel cannot tell).
+   */
+  readonly serverReport?: ServerReport;
 }
+
+/** One MCP server as the agent reports it: its name, and how its connection went. */
+export interface ReportedServer {
+  readonly name: string;
+  readonly status: string;
+}
+
+export interface ServerReport {
+  /** Merged into `session/new` as `_meta`: the adapter's opt-in to send the report. */
+  readonly sessionMeta: Record<string, unknown>;
+  /** The notification that carries the report. */
+  readonly notification: string;
+  /** The servers it names, or `undefined` when this notification is not the report. */
+  servers(params: unknown): readonly ReportedServer[] | undefined;
+}
+
+/**
+ * Claude's adapter forwards Claude Code's own messages on request (`_meta.claudeCode
+ * .emitRawSDKMessages` in `session/new`, as `_claude/sdkMessage`; read in
+ * `@agentclientprotocol/claude-agent-acp` 0.102.0). The `system`/`init` message lists the
+ * session's MCP servers with their status. Claude Code sends it when a turn starts, so the
+ * check runs on the first turn, not when the session is created. A server Claude Code's
+ * settings do not allow (`allowedMcpServers`) is not in it at all: Claude Code drops it before
+ * starting it, and says nothing.
+ */
+const CLAUDE_SERVER_REPORT: ServerReport = {
+  sessionMeta: { claudeCode: { emitRawSDKMessages: [{ type: 'system', subtype: 'init' }] } },
+  notification: '_claude/sdkMessage',
+  servers(params) {
+    const message = (params as { message?: Record<string, unknown> } | null)?.message;
+    if (message?.['type'] !== 'system' || message['subtype'] !== 'init') return undefined;
+    const servers = message['mcp_servers'];
+    if (!Array.isArray(servers)) return [];
+    return servers
+      .filter(
+        (server): server is { name: string; status?: unknown } =>
+          typeof (server as { name?: unknown } | null)?.name === 'string',
+      )
+      .map((server) => ({
+        name: server.name,
+        status: typeof server.status === 'string' ? server.status : '',
+      }));
+  },
+};
 
 export const DRIVERS: readonly Driver[] = [
   {
@@ -32,6 +82,7 @@ export const DRIVERS: readonly Driver[] = [
     args: [],
     install: ['npm install -g @agentclientprotocol/claude-agent-acp'],
     login: ['claude', '/login'],
+    serverReport: CLAUDE_SERVER_REPORT,
   },
 ];
 

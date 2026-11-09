@@ -115,6 +115,22 @@ function connect(transport, options = {}) {
 }
 
 // src/drivers.ts
+var CLAUDE_SERVER_REPORT = {
+  sessionMeta: { claudeCode: { emitRawSDKMessages: [{ type: "system", subtype: "init" }] } },
+  notification: "_claude/sdkMessage",
+  servers(params) {
+    const message = params?.message;
+    if (message?.["type"] !== "system" || message["subtype"] !== "init") return void 0;
+    const servers = message["mcp_servers"];
+    if (!Array.isArray(servers)) return [];
+    return servers.filter(
+      (server) => typeof server?.name === "string"
+    ).map((server) => ({
+      name: server.name,
+      status: typeof server.status === "string" ? server.status : ""
+    }));
+  }
+};
 var DRIVERS = [
   {
     id: "claude",
@@ -124,7 +140,8 @@ var DRIVERS = [
     program: "claude-agent-acp",
     args: [],
     install: ["npm install -g @agentclientprotocol/claude-agent-acp"],
-    login: ["claude", "/login"]
+    login: ["claude", "/login"],
+    serverReport: CLAUDE_SERVER_REPORT
   }
 ];
 var SETTINGS = [
@@ -225,6 +242,51 @@ function loginProblem(choice) {
     steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(" ")}`]
   };
 }
+var WINDOW_SERVER = "tyto";
+function toolsProblem(choice, servers) {
+  const label = choice.driver.label;
+  const server = servers.find((candidate) => candidate.name === WINDOW_SERVER);
+  if (server === void 0) {
+    return {
+      kind: "no-tools",
+      message: `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`,
+      steps: []
+    };
+  }
+  if (server.status === "connected" || server.status === "pending") return void 0;
+  return {
+    kind: "no-tools",
+    message: `${label} has Tyto's tools configured, but they did not connect (status: ${server.status || "unknown"}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
+    steps: []
+  };
+}
+var TYTO_TOOLS = {
+  list_templates: "list templates",
+  describe_template: "describe a template",
+  check_brief: "check the brief",
+  render_preview: "render a preview",
+  brief_in_front: "read the brief in front",
+  selection: "read the selection",
+  open_file: "open a file",
+  show_format: "show a format",
+  propose_edit: "propose an edit",
+  proposal_status: "check a proposal"
+};
+function toolTitle(name, title) {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(name);
+  if (match !== null) {
+    const [, server, tool] = match;
+    if (server === WINDOW_SERVER) return `Tyto \xB7 ${TYTO_TOOLS[tool] ?? tool.replaceAll("_", " ")}`;
+    return `${server} \xB7 ${tool}`;
+  }
+  return title !== "" ? title : name;
+}
+function toolNameOf(update) {
+  if (typeof update["name"] === "string") return update["name"];
+  const meta = update["_meta"];
+  const named = meta?.claudeCode?.toolName;
+  return typeof named === "string" ? named : "";
+}
 function conversation(host) {
   const entries = [];
   let seq = 0;
@@ -237,6 +299,7 @@ function conversation(host) {
   let messages = [];
   let reply = "";
   const permissions = /* @__PURE__ */ new Map();
+  const toolTitles = /* @__PURE__ */ new Map();
   const push = (entry) => {
     seq += 1;
     entries.push({ ...entry, seq });
@@ -261,10 +324,16 @@ function conversation(host) {
     } else if (kind === "agent_thought_chunk" && text !== "") {
       push({ kind: "thought", text });
     } else if (kind === "tool_call" || kind === "tool_call_update") {
+      const id = String(update2["toolCallId"] ?? "");
+      const named = toolTitle(
+        toolNameOf(update2),
+        typeof update2["title"] === "string" ? update2["title"] : ""
+      );
+      if (named !== "") toolTitles.set(id, named);
       push({
         kind: "tool",
-        id: String(update2["toolCallId"] ?? ""),
-        title: typeof update2["title"] === "string" ? update2["title"] : "",
+        id,
+        title: toolTitles.get(id) ?? "",
         status: typeof update2["status"] === "string" ? update2["status"] : ""
       });
     } else if (kind === "plan" && Array.isArray(update2["entries"])) {
@@ -341,6 +410,21 @@ function conversation(host) {
     });
     connection.handle("session/update", update);
     connection.handle("session/request_permission", askPermission);
+    const report = choice.driver.serverReport;
+    if (report !== void 0) {
+      connection.handle(report.notification, (params) => {
+        const servers = report.servers(params);
+        if (servers === void 0 || window === "off" || window === "unavailable") return;
+        const missing = toolsProblem(choice, servers);
+        if (missing !== void 0) {
+          problem = missing;
+          window = "missing";
+        } else if (problem?.kind === "no-tools") {
+          problem = null;
+          window = "connected";
+        }
+      });
+    }
     void program.exited.then((exit) => {
       connection.close("the agent ended");
       cancelPermissions();
@@ -362,7 +446,8 @@ function conversation(host) {
       });
       const created = await connection.request("session/new", {
         cwd: program.cwd,
-        mcpServers: await windowServers()
+        mcpServers: await windowServers(),
+        ...report === void 0 ? {} : { _meta: report.sessionMeta }
       });
       if (typeof created?.sessionId !== "string")
         throw new Error("session/new answered no sessionId");
@@ -447,6 +532,7 @@ function conversation(host) {
       running = void 0;
       busy = false;
       entries.length = 0;
+      toolTitles.clear();
       messages = [];
       problem = null;
       window = "unknown";

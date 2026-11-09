@@ -1,24 +1,20 @@
-import { readFileSync } from 'node:fs';
-
 import { type Browser, type Frame, type Page, chromium } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { openPanelPage } from './panel-page.js';
 
 /**
  * The panel page's colours in both of Tyto's themes, measured on rendered pixels.
  *
  * The page runs in the system Chrome (`channel: 'chrome'`, which GitHub's Ubuntu runners
- * carry), inside a host page that does what Tyto's window does to a panel (read in Tyto's
- * `apps/desktop`, not measured there): a sandboxed iframe from another origin, on a white
- * backdrop in both themes (`--tyto-plugin-page`), in a document whose scheme is
- * `light dark`. The host answers the page's `call`s with a fixed conversation. Each line the
- * person must read is photographed, and the contrast between its background (its most common
- * pixel) and its most distant pixel must reach 4.5:1, WCAG's floor for body text.
+ * carry), in the host page `openPanelPage` stands in for Tyto's window with, which answers the
+ * page's `call`s with a fixed conversation. Each line the person must read is photographed, and
+ * the contrast between its background (its most common pixel) and its most distant pixel must
+ * reach 4.5:1, WCAG's floor for body text.
  *
  * On Tyto 0.17.0's dark theme, 9 November 2026, every line was light text on that white
  * backdrop: readable only when selected.
  */
-
-const PANEL = new URL('../panel/', import.meta.url);
 
 const PROBLEM = {
   kind: 'not-logged-in',
@@ -39,30 +35,6 @@ const ENTRIES = [
   { seq: 3, kind: 'tool', id: 't1', title: 'read_brief', status: 'completed' },
   { seq: 4, kind: 'notice', text: 'The agent ended.' },
 ];
-
-/** The window's part: the frame, its white backdrop, and answers to the page's requests. */
-const HOST = `<!doctype html><html><head><meta charset="utf-8"><style>
-:root{color-scheme:light dark}
-body{margin:0}
-iframe{border:0;width:420px;height:560px;background:#ffffff}
-</style></head><body>
-<iframe sandbox="allow-scripts" src="https://panel.test/index.html"></iframe>
-<script>
-const status = ${JSON.stringify(STATUS)};
-let entries = ${JSON.stringify(ENTRIES)};
-const answers = {
-  open: () => ({ ...status, history: [] }),
-  read: () => { const sent = entries; entries = []; return { entries: sent, status }; },
-};
-window.addEventListener('message', (event) => {
-  const m = event.data;
-  if (!m || m.tyto !== 'panel' || m.type !== 'request') return;
-  const answer = answers[m.args[0]];
-  event.source.postMessage(answer
-    ? { tyto: 'panel', type: 'response', id: m.id, ok: true, value: answer() }
-    : { tyto: 'panel', type: 'response', id: m.id, ok: false, message: 'unknown' }, '*');
-});
-</script></body></html>`;
 
 /** What each line is: its selector in the page, and what it says. */
 const LINES = [
@@ -155,21 +127,7 @@ async function contrastOf(png: Buffer): Promise<number> {
 }
 
 async function panelIn(scheme: 'light' | 'dark'): Promise<Frame> {
-  const context = await browser.newContext({ colorScheme: scheme });
-  await context.route('https://tyto.test/**', (route) =>
-    route.fulfill({ contentType: 'text/html', body: HOST }),
-  );
-  await context.route('https://panel.test/**', (route) => {
-    const name = new URL(route.request().url()).pathname.slice(1);
-    return route.fulfill({
-      contentType: name.endsWith('.js') ? 'text/javascript' : 'text/html',
-      body: readFileSync(new URL(name, PANEL)),
-    });
-  });
-  const page = await context.newPage();
-  await page.goto('https://tyto.test/');
-  const frame = page.frames().find((candidate) => candidate.url().startsWith('https://panel.test'));
-  if (frame === undefined) throw new Error('the panel frame never loaded');
+  const frame = await openPanelPage(browser, { scheme, status: STATUS, entries: ENTRIES });
   await frame.waitForSelector('.notice');
   await frame.waitForSelector('.problem');
   return frame;
