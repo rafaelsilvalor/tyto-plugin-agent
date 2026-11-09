@@ -1,0 +1,298 @@
+import { readFileSync } from 'node:fs';
+
+import { panelCallerOf } from '@tyto/plugin-api';
+import { testPlugin } from '@tyto/plugin-api/testing';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import {
+  type FakeAgent,
+  type FakeAgentOptions,
+  FOLDER,
+  WINDOW_SERVER,
+  fakeAgent,
+} from './fake-agent.js';
+
+/**
+ * The panel as the window drives it: the committed `dist/index.js`, activated over the isolation
+ * protocol by Tyto's own harness (`testPlugin`, Tyto ADR 0150), its panel asked through `call`
+ * exactly as the page asks, with a fake ACP agent behind the host's `startProcess` port.
+ */
+
+const manifest = readFileSync(new URL('../tyto-plugin.json', import.meta.url), 'utf8');
+const entry = new URL('../dist/index.js', import.meta.url).href;
+
+interface Entry {
+  readonly seq: number;
+  readonly kind: string;
+  readonly [key: string]: unknown;
+}
+
+interface Status {
+  readonly agent: string;
+  readonly running: boolean;
+  readonly busy: boolean;
+  readonly window: string;
+  readonly folder: string | null;
+  readonly problem: { kind: string; message: string; steps: string[] } | null;
+}
+
+const closing: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const close of closing.splice(0)) await close();
+});
+
+async function panel(
+  options: FakeAgentOptions & { readonly settings?: Record<string, unknown> } = {},
+  agent: FakeAgent = fakeAgent(options),
+) {
+  const harness = await testPlugin({
+    manifest,
+    load: () => import(entry),
+    capabilities: agent.capabilities,
+    ...(options.settings === undefined ? {} : { settings: options.settings }),
+  });
+  if (!harness.ok) throw new Error(harness.error.map((item) => item.message).join('\n'));
+  closing.push(() => harness.value.close());
+  const caller = panelCallerOf(harness.value.host.registry);
+  const call = async <T>(method: string, params?: unknown): Promise<T> => {
+    const answer = await caller('agent', params === undefined ? { method } : { method, params });
+    if (!answer.ok) throw new Error(answer.error.map((item) => item.message).join('\n'));
+    return answer.value as T;
+  };
+  let after = 0;
+  const seen: Entry[] = [];
+  /** Reads as the page does, until `done` holds for what was read so far. */
+  const readUntil = async (done: (entries: readonly Entry[]) => boolean): Promise<Entry[]> => {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const { entries } = await call<{ entries: Entry[] }>('read', { after });
+      for (const item of entries) {
+        seen.push(item);
+        after = item.seq;
+      }
+      if (done(seen)) return seen;
+      if (Date.now() > deadline) throw new Error(`never done; read ${JSON.stringify(seen)}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  return { agent, call, readUntil, seen };
+}
+
+const ended = (entries: readonly Entry[]) => entries.some((item) => item.kind === 'end');
+const textOf = (entries: readonly Entry[]) =>
+  entries
+    .filter((item) => item.kind === 'text')
+    .map((item) => item.text)
+    .join('');
+
+describe('a conversation with the agent', () => {
+  it('starts the adapter in the folder Tyto reports, with the window server, and streams a turn', async () => {
+    const { agent, call, readUntil } = await panel();
+    const opened = await call<Status>('open');
+    expect(opened).toMatchObject({
+      agent: 'Claude',
+      running: true,
+      window: 'connected',
+      folder: FOLDER,
+      problem: null,
+    });
+    expect(agent.started).toEqual([{ program: 'claude-agent-acp', args: [] }]);
+    // ACP's session/new: the absolute cwd the host reported, and the window's MCP server.
+    expect(agent.heard.find((item) => item.method === 'session/new')?.params).toEqual({
+      cwd: FOLDER,
+      mcpServers: [WINDOW_SERVER],
+    });
+
+    expect(await call('send', { text: 'monta o brief' })).toEqual({ accepted: true });
+    const entries = await readUntil(ended);
+    expect(entries.map((item) => item.kind)).toEqual(['user', 'text', 'text', 'end']);
+    expect(textOf(entries)).toBe('Hello, world');
+    const prompt = agent.heard.find((item) => item.method === 'session/prompt')?.params;
+    expect(prompt).toEqual({
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'monta o brief' }],
+    });
+  });
+
+  it('refuses a second message while a turn runs', async () => {
+    let finish: () => void = () => undefined;
+    const { call, readUntil } = await panel({
+      turn: () => new Promise((resolve) => (finish = () => resolve('end_turn'))),
+    });
+    await call('open');
+    expect(await call('send', { text: 'one' })).toEqual({ accepted: true });
+    expect(await call('send', { text: 'two' })).toMatchObject({ accepted: false });
+    finish();
+    await readUntil(ended);
+    expect(await call('send', { text: 'three' })).toEqual({ accepted: true });
+  });
+
+  it('passes the person’s extra arguments after the driver’s', async () => {
+    const { agent, call } = await panel({ settings: { 'agent.args': ['--model', 'sonnet'] } });
+    await call('open');
+    expect(agent.started).toEqual([{ program: 'claude-agent-acp', args: ['--model', 'sonnet'] }]);
+  });
+});
+
+describe('a permission the agent asks for', () => {
+  it('shows it, and hands the agent the option the person chose', async () => {
+    let outcome: unknown;
+    const { call, readUntil } = await panel({
+      turn: async (tools) => {
+        outcome = await tools.permission('propose_edit');
+        tools.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't1',
+          title: 'propose_edit',
+          status: 'completed',
+        });
+        return 'end_turn';
+      },
+    });
+    await call('open');
+    await call('send', { text: 'edit it' });
+    const asked = await readUntil((entries) => entries.some((item) => item.kind === 'permission'));
+    const permission = asked.find((item) => item.kind === 'permission')!;
+    expect(permission).toMatchObject({
+      title: 'propose_edit',
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    });
+    expect(await call('answer', { id: permission['id'], optionId: 'allow' })).toEqual({
+      answered: true,
+    });
+    const entries = await readUntil(ended);
+    expect(outcome).toEqual({ outcome: 'selected', optionId: 'allow' });
+    expect(entries.map((item) => item.kind)).toEqual([
+      'user',
+      'permission',
+      'answered',
+      'tool',
+      'end',
+    ]);
+  });
+
+  it('answers a waiting permission cancelled when the person stops the turn', async () => {
+    let outcome: unknown;
+    const { agent, call, readUntil } = await panel({
+      turn: async (tools) => {
+        outcome = await tools.permission('render_preview');
+        await tools.cancelled;
+        return 'cancelled';
+      },
+    });
+    await call('open');
+    await call('send', { text: 'render' });
+    await readUntil((entries) => entries.some((item) => item.kind === 'permission'));
+    await call('cancel');
+    const entries = await readUntil(ended);
+    expect(outcome).toEqual({ outcome: 'cancelled' });
+    expect(agent.heard.map((item) => item.method)).toContain('session/cancel');
+    expect(entries.at(-1)).toMatchObject({ kind: 'end', reason: 'cancelled' });
+  });
+});
+
+describe('the states the card names', () => {
+  it('says how to install the adapter when it is not on PATH', async () => {
+    const { call } = await panel({ refuse: 'E_PROCESS_NOT_FOUND' });
+    const status = await call<Status>('open');
+    expect(status.running).toBe(false);
+    expect(status.problem).toEqual({
+      kind: 'not-installed',
+      message:
+        "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
+      steps: [
+        'npm install -g @agentclientprotocol/claude-agent-acp',
+        'then sign in once: claude /login',
+      ],
+    });
+  });
+
+  it('says how to sign in when the agent asks for authentication, and ends the adapter', async () => {
+    const { agent, call } = await panel({ signedOut: true });
+    const status = await call<Status>('open');
+    expect(status.problem?.kind).toBe('not-logged-in');
+    expect(status.problem?.steps).toEqual(['open a terminal in Tyto and run: claude /login']);
+    expect(agent.killed()).toBe(1);
+  });
+
+  it('says the folder is restricted, and starts nothing', async () => {
+    const { agent, call } = await panel({ refuse: 'E_PROCESS_RESTRICTED' });
+    const status = await call<Status>('open');
+    expect(status.problem?.kind).toBe('restricted');
+    expect(agent.started).toEqual([]);
+  });
+
+  it('talks without the window when agentsListen is off, and says so', async () => {
+    const { agent, call, readUntil } = await panel({ window: 'E_WINDOW_AGENTS_OFF' });
+    const status = await call<Status>('open');
+    expect(status).toMatchObject({ running: true, window: 'off', problem: null });
+    expect(agent.heard.find((item) => item.method === 'session/new')?.params).toEqual({
+      cwd: FOLDER,
+      mcpServers: [],
+    });
+    const notice = await readUntil((entries) => entries.some((item) => item.kind === 'notice'));
+    expect(String(notice[0]?.['text'])).toContain('setting agentsListen');
+  });
+
+  it('says the agent ended, and starts it again on the next message', async () => {
+    let turns = 0;
+    const { agent, call, readUntil } = await panel({
+      turn: async (tools) => {
+        turns += 1;
+        if (turns === 1) {
+          tools.exit(1);
+          return undefined;
+        }
+        return 'end_turn';
+      },
+    });
+    await call('open');
+    await call('send', { text: 'first' });
+    const first = await readUntil((entries) =>
+      entries.some((item) => item.kind === 'notice' && String(item['text']).includes('ended')),
+    );
+    expect(first.some((item) => item.kind === 'notice')).toBe(true);
+    await readUntil(() => true);
+    expect((await call<{ status: Status }>('read', { after: 1e9 })).status.busy).toBe(false);
+    await call('send', { text: 'second' });
+    await readUntil(ended);
+    expect(agent.started).toHaveLength(2);
+  });
+});
+
+describe('the history kept per folder', () => {
+  it('keeps what was said in this folder, and shows it in the next conversation', async () => {
+    const agent = fakeAgent();
+    const first = await panel({}, agent);
+    await first.call('open');
+    await first.call('send', { text: 'oi' });
+    await first.readUntil(ended);
+
+    const second = await panel({}, agent);
+    const status = await second.call<Status & { history: unknown[] }>('open');
+    expect(status.history).toEqual([
+      { role: 'user', text: 'oi' },
+      { role: 'agent', text: 'Hello, world' },
+    ]);
+    // Nothing but the conversation is stored: no token, no setting.
+    const stored = [...agent.cache.values()].map((bytes) => new TextDecoder().decode(bytes));
+    expect(stored).toHaveLength(1);
+    expect(JSON.parse(stored[0]!)).toEqual({ folder: FOLDER, messages: status.history });
+  });
+
+  it('shows nothing from another folder', async () => {
+    const agent = fakeAgent();
+    const first = await panel({}, agent);
+    await first.call('open');
+    await first.call('send', { text: 'oi' });
+    await first.readUntil(ended);
+
+    const elsewhere = fakeAgent({ folder: '/home/ana/other' });
+    for (const [key, bytes] of agent.cache) elsewhere.cache.set(key, bytes);
+    const second = await panel({}, elsewhere);
+    expect((await second.call<{ history: unknown[] }>('open')).history).toEqual([]);
+  });
+});

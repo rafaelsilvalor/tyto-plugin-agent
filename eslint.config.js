@@ -76,6 +76,14 @@ export default tseslint.config(
   },
 
   {
+    // The panel's page runs in the window's sandboxed frame, a browser with no network (Tyto
+    // ADR 0045): browser globals, and nothing of Node.
+    name: 'browser/panel',
+    files: ['panel/**/*.js'],
+    languageOptions: { globals: globals.browser, sourceType: 'script' },
+  },
+
+  {
     name: 'node/tests-and-scripts',
     files: ['src/**/*.test.ts', 'tests/**/*.ts', 'scripts/**/*.{js,mjs}', '*.config.{js,ts}'],
     languageOptions: { globals: globals.node },

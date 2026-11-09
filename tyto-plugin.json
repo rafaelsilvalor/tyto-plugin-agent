@@ -2,6 +2,6 @@
   "name": "agent",
   "version": "0.1.0",
   "engine": ">=0.16",
-  "contributes": ["panel"],
-  "permissions": []
+  "contributes": ["panel", "configuration"],
+  "permissions": ["process:claude-agent-acp"]
 }
