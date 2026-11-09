@@ -57,13 +57,23 @@ export interface PermissionOption {
  */
 export interface Problem {
   readonly kind:
-    'not-installed' | 'not-logged-in' | 'restricted' | 'no-programs' | 'exited' | 'failed';
+    | 'not-installed'
+    | 'not-logged-in'
+    | 'restricted'
+    | 'no-programs'
+    | 'exited'
+    | 'failed'
+    | 'no-tools';
   readonly message: string;
   readonly steps: readonly string[];
 }
 
-/** Whether the agent reaches the window's tools: `off` is the `agentsListen` setting. */
-export type WindowReach = 'connected' | 'off' | 'unavailable' | 'unknown';
+/**
+ * Whether the agent reaches the window's tools. `connected` is that Tyto handed the agent the
+ * window's server; `missing`, that the agent reported its session without it, or with it not
+ * connected (`driver.serverReport`). `off` is the `agentsListen` setting.
+ */
+export type WindowReach = 'connected' | 'missing' | 'off' | 'unavailable' | 'unknown';
 
 export interface Status {
   readonly agent: string;
@@ -128,6 +138,73 @@ export function loginProblem(choice: AgentChoice): Problem {
   };
 }
 
+/** The name Tyto gives the window's MCP server (Tyto ADR 0183, `WINDOW_AGENT_SERVER_NAME`). */
+const WINDOW_SERVER = 'tyto';
+
+/**
+ * What the person reads when the agent's session has no Tyto tools. `undefined` when it has
+ * them, and when they are still connecting: a slow start is not a missing server.
+ */
+export function toolsProblem(
+  choice: AgentChoice,
+  servers: readonly { readonly name: string; readonly status: string }[],
+): Problem | undefined {
+  const label = choice.driver.label;
+  const server = servers.find((candidate) => candidate.name === WINDOW_SERVER);
+  if (server === undefined) {
+    return {
+      kind: 'no-tools',
+      message: `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`,
+      steps: [],
+    };
+  }
+  if (server.status === 'connected' || server.status === 'pending') return undefined;
+  return {
+    kind: 'no-tools',
+    message: `${label} has Tyto's tools configured, but they did not connect (status: ${server.status || 'unknown'}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
+    steps: [],
+  };
+}
+
+/**
+ * Tyto's window tools (`MCP_TOOLS` in Tyto 0.17.0's `packages/command-line/src/mcp/tools.ts`),
+ * as a tool line names them. A tool Tyto adds later shows by its own name.
+ */
+const TYTO_TOOLS: Readonly<Record<string, string>> = {
+  list_templates: 'list templates',
+  describe_template: 'describe a template',
+  check_brief: 'check the brief',
+  render_preview: 'render a preview',
+  brief_in_front: 'read the brief in front',
+  selection: 'read the selection',
+  open_file: 'open a file',
+  show_format: 'show a format',
+  propose_edit: 'propose an edit',
+  proposal_status: 'check a proposal',
+};
+
+/**
+ * A tool line's name: an MCP tool as `<server> · <tool>` (Tyto's own with a short label), any
+ * other by the title the agent gave it, else its name.
+ */
+export function toolTitle(name: string, title: string): string {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(name);
+  if (match !== null) {
+    const [, server, tool] = match as unknown as [string, string, string];
+    if (server === WINDOW_SERVER) return `Tyto · ${TYTO_TOOLS[tool] ?? tool.replaceAll('_', ' ')}`;
+    return `${server} · ${tool}`;
+  }
+  return title !== '' ? title : name;
+}
+
+/** The tool's own name in an update: ACP's `name` field, or the adapter's `_meta`. */
+function toolNameOf(update: Record<string, unknown>): string {
+  if (typeof update['name'] === 'string') return update['name'];
+  const meta = update['_meta'] as { claudeCode?: { toolName?: unknown } } | undefined;
+  const named = meta?.claudeCode?.toolName;
+  return typeof named === 'string' ? named : '';
+}
+
 interface Running {
   readonly program: PluginProcess;
   readonly connection: Connection;
@@ -162,6 +239,8 @@ export function conversation(
   let messages: HistoryMessage[] = [];
   let reply = '';
   const permissions = new Map<string, (optionId: string | null) => void>();
+  /** Each tool call's line name, from its first report: updates rarely repeat it. */
+  const toolTitles = new Map<string, string>();
 
   // Typed per kind: `Omit` over the union would lose which fields go with which kind.
   const push = (entry: Record<string, unknown> & { kind: Entry['kind'] }): void => {
@@ -190,10 +269,16 @@ export function conversation(
     } else if (kind === 'agent_thought_chunk' && text !== '') {
       push({ kind: 'thought', text });
     } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+      const id = String(update['toolCallId'] ?? '');
+      const named = toolTitle(
+        toolNameOf(update),
+        typeof update['title'] === 'string' ? update['title'] : '',
+      );
+      if (named !== '') toolTitles.set(id, named);
       push({
         kind: 'tool',
-        id: String(update['toolCallId'] ?? ''),
-        title: typeof update['title'] === 'string' ? update['title'] : '',
+        id,
+        title: toolTitles.get(id) ?? '',
         status: typeof update['status'] === 'string' ? update['status'] : '',
       });
     } else if (kind === 'plan' && Array.isArray(update['entries'])) {
@@ -283,6 +368,22 @@ export function conversation(
     });
     connection.handle('session/update', update);
     connection.handle('session/request_permission', askPermission);
+    const report = choice.driver.serverReport;
+    if (report !== undefined) {
+      connection.handle(report.notification, (params) => {
+        const servers = report.servers(params);
+        // Only a session Tyto offered its server to can be missing it.
+        if (servers === undefined || window === 'off' || window === 'unavailable') return;
+        const missing = toolsProblem(choice, servers);
+        if (missing !== undefined) {
+          problem = missing;
+          window = 'missing';
+        } else if (problem?.kind === 'no-tools') {
+          problem = null;
+          window = 'connected';
+        }
+      });
+    }
     void program.exited.then((exit) => {
       connection.close('the agent ended');
       cancelPermissions();
@@ -305,6 +406,7 @@ export function conversation(
       const created = (await connection.request('session/new', {
         cwd: program.cwd,
         mcpServers: await windowServers(),
+        ...(report === undefined ? {} : { _meta: report.sessionMeta }),
       })) as { sessionId?: unknown } | null;
       if (typeof created?.sessionId !== 'string')
         throw new Error('session/new answered no sessionId');
@@ -398,6 +500,7 @@ export function conversation(
       running = undefined;
       busy = false;
       entries.length = 0;
+      toolTitles.clear();
       messages = [];
       problem = null;
       window = 'unknown';

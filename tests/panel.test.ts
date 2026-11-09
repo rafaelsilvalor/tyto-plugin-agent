@@ -79,6 +79,17 @@ async function panel(
 }
 
 const ended = (entries: readonly Entry[]) => entries.some((item) => item.kind === 'end');
+
+/** Waits for the turn to be over, then answers the whole log and the status. */
+async function afterTurn(call: Awaited<ReturnType<typeof panel>>['call']) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const read = await call<{ entries: Entry[]; status: Status }>('read', { after: 0 });
+    if (!read.status.busy) return read;
+    if (Date.now() > deadline) throw new Error('the turn never ended');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 const textOf = (entries: readonly Entry[]) =>
   entries
     .filter((item) => item.kind === 'text')
@@ -101,6 +112,7 @@ describe('a conversation with the agent', () => {
     expect(agent.heard.find((item) => item.method === 'session/new')?.params).toEqual({
       cwd: FOLDER,
       mcpServers: [WINDOW_SERVER],
+      _meta: expect.any(Object),
     });
 
     expect(await call('send', { text: 'monta o brief' })).toEqual({ accepted: true });
@@ -220,16 +232,6 @@ describe('the states the card names', () => {
 
   // The page draws the status's problem as a box with its steps; the same words as a log line
   // too showed the message twice (seen on Tyto 0.17.0, 9 November 2026).
-  /** Waits for the turn to be over, then answers the whole log and the status. */
-  async function afterTurn(call: Awaited<ReturnType<typeof panel>>['call']) {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      const read = await call<{ entries: Entry[]; status: Status }>('read', { after: 0 });
-      if (!read.status.busy) return read;
-      if (Date.now() > deadline) throw new Error('the turn never ended');
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
 
   it('says "not signed in" once, as the problem, when a message finds the agent signed out', async () => {
     const { call } = await panel({ signedOut: true });
@@ -263,6 +265,7 @@ describe('the states the card names', () => {
     expect(agent.heard.find((item) => item.method === 'session/new')?.params).toEqual({
       cwd: FOLDER,
       mcpServers: [],
+      _meta: expect.any(Object),
     });
     const notice = await readUntil((entries) => entries.some((item) => item.kind === 'notice'));
     expect(String(notice[0]?.['text'])).toContain('setting agentsListen');
@@ -291,6 +294,126 @@ describe('the states the card names', () => {
     await call('send', { text: 'second' });
     await readUntil(ended);
     expect(agent.started).toHaveLength(2);
+  });
+});
+
+// Seen on Tyto 0.17.0, 9 November 2026: the organisation's Claude Code settings allowed a list
+// of MCP servers without `tyto`, Claude Code dropped the window's server without a word, and
+// the panel said "sees the window". Claude's adapter reports the session's servers on the
+// first turn when asked to (`_claude/sdkMessage`, Claude Code's `system`/`init`).
+describe("Tyto's tools in the agent's session", () => {
+  /** One turn, then the status as the page reads it. */
+  async function firstTurn(options: FakeAgentOptions) {
+    const run = await panel(options);
+    await run.call('open');
+    await run.call('send', { text: 'oi' });
+    return { ...run, ...(await afterTurn(run.call)) };
+  }
+
+  it('asks Claude’s adapter for the report in session/new', async () => {
+    const { agent } = await firstTurn({ init: [{ name: 'tyto', status: 'connected' }] });
+    const created = agent.heard.find((item) => item.method === 'session/new')?.params;
+    expect(created).toMatchObject({
+      _meta: { claudeCode: { emitRawSDKMessages: [{ type: 'system', subtype: 'init' }] } },
+    });
+  });
+
+  it('says the agent lacks Tyto’s tools when the session has no tyto server', async () => {
+    const { status } = await firstTurn({
+      init: [
+        { name: 'claude.ai Figma', status: 'connected' },
+        { name: 'claude.ai Notion', status: 'connected' },
+      ],
+    });
+    expect(status.window).toBe('missing');
+    expect(status.problem?.kind).toBe('no-tools');
+    expect(status.problem?.message).toContain("Claude started without Tyto's tools");
+    expect(status.problem?.message).toContain('allowedMcpServers');
+    expect(status.problem?.message).toContain(
+      "Ask your organisation's admin to allow the MCP server `tyto`; Tyto does not work around that policy.",
+    );
+  });
+
+  it('says nothing when the tyto server connected', async () => {
+    const { status, entries } = await firstTurn({
+      init: [
+        { name: 'claude.ai Figma', status: 'connected' },
+        { name: 'tyto', status: 'connected' },
+      ],
+    });
+    expect(status).toMatchObject({ window: 'connected', problem: null });
+    expect(entries.filter((item) => item.kind === 'notice')).toEqual([]);
+  });
+
+  it('says nothing when the agent sends no report: no false alarm', async () => {
+    const { status } = await firstTurn({});
+    expect(status).toMatchObject({ window: 'connected', problem: null });
+  });
+
+  it('says the tools did not connect when the tyto server failed', async () => {
+    const { status } = await firstTurn({ init: [{ name: 'tyto', status: 'failed' }] });
+    expect(status.window).toBe('missing');
+    expect(status.problem?.message).toContain('did not connect (status: failed)');
+  });
+
+  it('waits on a tyto server still connecting', async () => {
+    const { status } = await firstTurn({ init: [{ name: 'tyto', status: 'pending' }] });
+    expect(status).toMatchObject({ window: 'connected', problem: null });
+  });
+
+  it('does not blame a policy when Tyto offered no server (agentsListen off)', async () => {
+    const { status } = await firstTurn({ window: 'E_WINDOW_AGENTS_OFF', init: [] });
+    expect(status).toMatchObject({ window: 'off', problem: null });
+  });
+});
+
+describe('tool lines', () => {
+  it('name Tyto’s tools, and keep the name when an update does not repeat it', async () => {
+    const { call } = await panel({
+      turn: async (tools) => {
+        tools.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't1',
+          name: 'mcp__tyto__describe_template',
+          title: 'describe_template',
+          status: 'pending',
+        });
+        tools.update({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 't1',
+          status: 'completed',
+          _meta: { claudeCode: { toolName: 'mcp__tyto__describe_template' } },
+        });
+        tools.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't2',
+          name: 'Read',
+          title: 'Read brief.brief',
+          status: 'pending',
+        });
+        tools.update({ sessionUpdate: 'tool_call_update', toolCallId: 't2', status: 'completed' });
+        tools.update({
+          sessionUpdate: 'tool_call',
+          toolCallId: 't3',
+          title: '',
+          status: 'pending',
+          _meta: { claudeCode: { toolName: 'mcp__figma__get_screenshot' } },
+        });
+        return 'end_turn';
+      },
+    });
+    await call('open');
+    await call('send', { text: 'oi' });
+    const { entries } = await afterTurn(call);
+    expect(
+      entries.filter((item) => item.kind === 'tool').map((item) => [item['title'], item['status']]),
+    ).toEqual([
+      ['Tyto · describe a template', 'pending'],
+      ['Tyto · describe a template', 'completed'],
+      ['Read brief.brief', 'pending'],
+      ['Read brief.brief', 'completed'],
+      ['figma · get_screenshot', 'pending'],
+    ]);
   });
 });
 
