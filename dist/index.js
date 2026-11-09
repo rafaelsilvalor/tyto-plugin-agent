@@ -388,7 +388,7 @@ function conversation(host) {
     try {
       const agent = await ensure();
       if (agent === void 0) {
-        push({ kind: "notice", text: problem?.message ?? "The agent did not start." });
+        if (problem === null) push({ kind: "notice", text: "The agent did not start." });
         return;
       }
       const answer = await agent.connection.request("session/prompt", {
@@ -399,7 +399,6 @@ function conversation(host) {
     } catch (cause) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
         problem = loginProblem(chosenAgent(host));
-        push({ kind: "notice", text: problem.message });
       } else {
         push({ kind: "notice", text: `The turn failed: ${messageOf(cause)}` });
       }

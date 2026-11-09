@@ -335,8 +335,10 @@ export function conversation(
     reply = '';
     try {
       const agent = await ensure();
+      // A problem is shown once, by the page, from the status with its steps; the log
+      // repeats it only when there is none to show.
       if (agent === undefined) {
-        push({ kind: 'notice', text: problem?.message ?? 'The agent did not start.' });
+        if (problem === null) push({ kind: 'notice', text: 'The agent did not start.' });
         return;
       }
       const answer = (await agent.connection.request('session/prompt', {
@@ -347,7 +349,6 @@ export function conversation(
     } catch (cause) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
         problem = loginProblem(chosenAgent(host));
-        push({ kind: 'notice', text: problem.message });
       } else {
         push({ kind: 'notice', text: `The turn failed: ${messageOf(cause)}` });
       }

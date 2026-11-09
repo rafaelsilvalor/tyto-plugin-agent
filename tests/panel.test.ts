@@ -218,6 +218,37 @@ describe('the states the card names', () => {
     expect(agent.killed()).toBe(1);
   });
 
+  // The page draws the status's problem as a box with its steps; the same words as a log line
+  // too showed the message twice (seen on Tyto 0.17.0, 9 November 2026).
+  /** Waits for the turn to be over, then answers the whole log and the status. */
+  async function afterTurn(call: Awaited<ReturnType<typeof panel>>['call']) {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const read = await call<{ entries: Entry[]; status: Status }>('read', { after: 0 });
+      if (!read.status.busy) return read;
+      if (Date.now() > deadline) throw new Error('the turn never ended');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('says "not signed in" once, as the problem, when a message finds the agent signed out', async () => {
+    const { call } = await panel({ signedOut: true });
+    await call('open');
+    expect(await call('send', { text: 'oi' })).toEqual({ accepted: true });
+    const { entries, status } = await afterTurn(call);
+    expect(status.problem?.kind).toBe('not-logged-in');
+    expect(entries.map((item) => item.kind)).toEqual(['user']);
+  });
+
+  it('says "not signed in" once, as the problem, when the login expires mid-conversation', async () => {
+    const { call } = await panel({ expiresAtPrompt: true });
+    expect((await call<Status>('open')).problem).toBeNull();
+    expect(await call('send', { text: 'oi' })).toEqual({ accepted: true });
+    const { entries, status } = await afterTurn(call);
+    expect(status.problem?.kind).toBe('not-logged-in');
+    expect(entries.map((item) => item.kind)).toEqual(['user']);
+  });
+
   it('says the folder is restricted, and starts nothing', async () => {
     const { agent, call } = await panel({ refuse: 'E_PROCESS_RESTRICTED' });
     const status = await call<Status>('open');

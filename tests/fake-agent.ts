@@ -43,6 +43,8 @@ export interface FakeAgentOptions {
   readonly refuse?: 'E_PROCESS_NOT_FOUND' | 'E_PROCESS_RESTRICTED';
   /** `session/new` answers ACP's "authentication required". */
   readonly signedOut?: boolean;
+  /** `session/prompt` answers ACP's "authentication required": a login that expired. */
+  readonly expiresAtPrompt?: boolean;
   /** The window's server, or the code `host.window.agentServer()` refuses with. */
   readonly window?: AgentServer | 'E_WINDOW_AGENTS_OFF';
   readonly folder?: string;
@@ -160,6 +162,8 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
         } else {
           say({ id: message.id, result: { sessionId: 'session-1' } });
         }
+      } else if (message.method === 'session/prompt' && options.expiresAtPrompt === true) {
+        say({ id: message.id, error: { code: -32000, message: 'Authentication required' } });
       } else if (message.method === 'session/prompt') {
         void prompt(
           message.id,
