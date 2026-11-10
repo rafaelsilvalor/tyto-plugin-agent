@@ -38,6 +38,7 @@ interface Status {
     message: string;
     steps: string[];
     params?: Record<string, string>;
+    canLogIn?: boolean;
   } | null;
 }
 
@@ -213,6 +214,81 @@ describe('a permission the agent asks for', () => {
   });
 });
 
+describe('signing in from the panel (TYTO-657)', () => {
+  it('opens a Tyto terminal running the adapter with the arguments it offered', async () => {
+    const { agent, call } = await panel({ signedOut: true, settings: { 'agent.args': ['-v'] } });
+    await call('open');
+    expect(await call('login')).toEqual({ opened: true });
+    expect(agent.terminals).toEqual([
+      { program: 'claude-agent-acp', args: ['-v', '--cli', 'auth', 'login', '--claudeai'] },
+    ]);
+  });
+
+  it('runs whatever terminal sign-in the adapter lists, never a command of its own', async () => {
+    const { agent, call } = await panel({
+      signedOut: true,
+      authMethods: [
+        { id: 'agent', name: 'Agent', type: 'agent' },
+        { id: 'new-login', name: 'Sign in', type: 'terminal', args: ['login', '--web'] },
+      ],
+    });
+    await call('open');
+    expect(await call('login')).toEqual({ opened: true });
+    expect(agent.terminals).toEqual([{ program: 'claude-agent-acp', args: ['login', '--web'] }]);
+  });
+
+  it('says so, and opens nothing, when the adapter offers no terminal sign-in', async () => {
+    const { agent, call } = await panel({ signedOut: true, authMethods: [] });
+    const status = await call<Status>('open');
+    expect(status.problem).toMatchObject({ kind: 'not-logged-in', canLogIn: false });
+    expect(status.problem?.message).toContain('offers no sign-in Tyto can open in a terminal');
+    expect(await call('login')).toEqual({ opened: false, code: 'no-method' });
+    expect(agent.terminals).toEqual([]);
+  });
+
+  it('offers Log in when it opens, from the adapter’s own report, and starts afresh after', async () => {
+    const { agent, call } = await panel({ signedOut: true, reportsAuth: true });
+    const status = await call<Status>('open');
+    expect(status.problem).toMatchObject({ kind: 'not-logged-in', canLogIn: true });
+    expect(await call('login')).toEqual({ opened: true });
+    agent.signIn();
+    const again = await call<Status>('open');
+    expect(again.problem).toBeNull();
+    expect(agent.started).toHaveLength(2);
+    expect(agent.killed()).toBe(1);
+    // The account the report names is never kept: nothing of it reaches the status.
+    expect(JSON.stringify(again)).not.toContain('ana@example.com');
+  });
+
+  it('tries again after the person signed in, and the conversation starts', async () => {
+    const { agent, call } = await panel({ signedOut: true });
+    expect((await call<Status>('open')).problem?.kind).toBe('not-logged-in');
+    await call('login');
+    agent.signIn();
+    const status = await call<Status>('open');
+    expect(status.problem).toBeNull();
+    expect(status.running).toBe(true);
+  });
+
+  it('answers the host’s refusals as codes the page says', async () => {
+    const answers = [];
+    for (const refuseTerminal of [
+      'E_TERMINAL_LIMIT',
+      'E_PROCESS_RESTRICTED',
+      'E_TERMINAL_UNAVAILABLE',
+    ] as const) {
+      const { call } = await panel({ signedOut: true, refuseTerminal });
+      await call('open');
+      answers.push(await call('login'));
+    }
+    expect(answers).toEqual([
+      { opened: false, code: 'already-open' },
+      { opened: false, code: 'restricted' },
+      { opened: false, code: 'no-terminal' },
+    ]);
+  });
+});
+
 describe('the states the card names', () => {
   it('says how to install the adapter when it is not on PATH', async () => {
     const { call } = await panel({ refuse: 'E_PROCESS_NOT_FOUND' });
@@ -222,21 +298,24 @@ describe('the states the card names', () => {
       kind: 'not-installed',
       message:
         "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
-      steps: [
-        'npm install -g @agentclientprotocol/claude-agent-acp',
-        'then sign in once: claude /login',
-      ],
-      params: { label: 'Claude', program: 'claude-agent-acp', login: 'claude /login' },
+      steps: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+      params: { label: 'Claude', program: 'claude-agent-acp' },
     });
   });
 
-  it('says how to sign in when the agent asks for authentication, and ends the adapter', async () => {
+  it('offers Log in when the agent asks for authentication, and ends the adapter', async () => {
     const { agent, call } = await panel({ signedOut: true });
     const status = await call<Status>('open');
-    expect(status.problem?.kind).toBe('not-logged-in');
-    expect(status.problem?.steps).toEqual(['open a terminal in Tyto and run: claude /login']);
-    expect(status.problem?.params).toEqual({ label: 'Claude', login: 'claude /login' });
+    expect(status.problem).toMatchObject({
+      kind: 'not-logged-in',
+      steps: [],
+      params: { label: 'Claude' },
+      canLogIn: true,
+    });
     expect(agent.killed()).toBe(1);
+    // The client said it can run a sign-in in a terminal, which is what makes the adapter list one.
+    const initialize = agent.heard.find((item) => item.method === 'initialize');
+    expect(initialize?.params).toMatchObject({ clientCapabilities: { auth: { terminal: true } } });
   });
 
   // The page draws the status's problem as a box with its steps; the same words as a log line

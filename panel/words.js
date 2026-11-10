@@ -71,8 +71,10 @@ const WORDS = {
     problems: {
       'not-installed': ({ label, program }) =>
         `${label}'s ACP adapter, ${program}, is not on your PATH. Tyto installs no agent.`,
-      'not-logged-in': ({ label }) =>
-        `${label} is not signed in. It uses its own login: Tyto never sees or stores it.`,
+      'not-logged-in': ({ label, canLogIn }) =>
+        canLogIn
+          ? `${label} is not signed in. **Log in** opens a Tyto terminal where ${label}'s own sign-in runs and your browser opens on its page; Tyto never sees or stores the login.`
+          : `${label} is not signed in, and its adapter offers no sign-in Tyto can open in a terminal. Sign ${label} in yourself, then press New. Tyto never sees or stores the login.`,
       restricted: () =>
         'The folder open in Tyto is restricted, and Tyto starts no program in a restricted folder. Trust the folder to talk to an agent here.',
       'no-programs': () =>
@@ -82,8 +84,19 @@ const WORDS = {
           ? `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`
           : `${label} has Tyto's tools configured, but they did not connect (status: ${status}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
     },
-    signInOnce: (login) => `then sign in once: ${login}`,
-    openTerminal: (login) => `open a terminal in Tyto and run: ${login}`,
+    logIn: (label) => `Log in to ${label}`,
+    tryAgain: 'Try again',
+    loginOpened:
+      'The sign-in runs in the Terminal tab below. Finish it in your browser, then come back here: the panel tries again by itself.',
+    signedIn: (label) => `${label} is signed in.`,
+    loginRefusals: {
+      'no-method': 'The agent offers no sign-in Tyto can open. Press New to ask it again.',
+      'already-open':
+        'A sign-in terminal is already open. Finish it there, or close that tab and press Log in again.',
+      restricted: 'The folder open in Tyto is restricted, so Tyto opens no terminal here.',
+      'no-terminal': 'This Tyto has no terminal; sign in from the desktop app.',
+      failed: (reason) => `The sign-in terminal did not open: ${reason}`,
+    },
   },
   'pt-BR': {
     agent: 'Agente',
@@ -148,8 +161,10 @@ const WORDS = {
     problems: {
       'not-installed': ({ label, program }) =>
         `O adaptador ACP do ${label}, ${program}, não está no seu PATH. O Tyto não instala agentes.`,
-      'not-logged-in': ({ label }) =>
-        `O ${label} não está conectado. Ele usa o próprio login: o Tyto nunca o vê nem o guarda.`,
+      'not-logged-in': ({ label, canLogIn }) =>
+        canLogIn
+          ? `O ${label} não está conectado. **Entrar** abre um terminal do Tyto onde roda o login do próprio ${label}, e o seu navegador abre na página dele; o Tyto nunca vê nem guarda o login.`
+          : `O ${label} não está conectado, e o adaptador dele não oferece um login que o Tyto possa abrir num terminal. Entre no ${label} por conta própria e clique em Nova. O Tyto nunca vê nem guarda o login.`,
       restricted: () =>
         'A pasta aberta no Tyto é restrita, e o Tyto não inicia programas numa pasta restrita. Confie na pasta para conversar com um agente aqui.',
       'no-programs': () =>
@@ -159,7 +174,19 @@ const WORDS = {
           ? `O ${label} iniciou sem as ferramentas do Tyto, então não vê o brief da frente nem age nele. A causa provável é uma lista de servidores MCP permitidos nas configurações do Claude Code (muitas vezes definida pela sua organização, como allowedMcpServers) que não inclui \`tyto\`. Peça ao administrador da sua organização para permitir o servidor MCP \`tyto\`; o Tyto não contorna essa política.`
           : `O ${label} tem as ferramentas do Tyto configuradas, mas elas não conectaram (status: ${status}), então ele não vê o brief da frente nem age nele. Clique em Nova para recomeçar; se acontecer de novo, o log MCP do Claude Code para \`tyto\` diz por quê.`,
     },
-    signInOnce: (login) => `depois entre uma vez: ${login}`,
-    openTerminal: (login) => `abra um terminal no Tyto e rode: ${login}`,
+    logIn: (label) => `Entrar no ${label}`,
+    tryAgain: 'Tentar de novo',
+    loginOpened:
+      'O login roda na aba Terminal, abaixo. Termine no navegador e volte aqui: o painel tenta de novo sozinho.',
+    signedIn: (label) => `O ${label} está conectado.`,
+    loginRefusals: {
+      'no-method':
+        'O agente não oferece um login que o Tyto possa abrir. Clique em Nova para perguntar de novo.',
+      'already-open':
+        'Já há um terminal de login aberto. Termine nele, ou feche aquela aba e clique em Entrar de novo.',
+      restricted: 'A pasta aberta no Tyto é restrita, então o Tyto não abre terminal aqui.',
+      'no-terminal': 'Este Tyto não tem terminal; entre pelo app de mesa.',
+      failed: (reason) => `O terminal de login não abriu: ${reason}`,
+    },
   },
 };

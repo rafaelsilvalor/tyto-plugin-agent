@@ -84,8 +84,53 @@ export interface Problem {
   /** In English; the page says it in its language from `kind` and `params` when it knows it. */
   readonly message: string;
   readonly steps: readonly string[];
-  /** The names `message` is built from: `label`, `program`, `login`, `status`. */
+  /** The names `message` is built from: `label`, `program`, `status`. */
   readonly params?: Readonly<Record<string, string>>;
+  /**
+   * For `not-logged-in`: whether the agent offered a sign-in the panel can open in a Tyto
+   * terminal (`login`). Without one the panel cannot sign the person in, and says so.
+   */
+  readonly canLogIn?: boolean;
+}
+
+/** One of the agent's terminal sign-ins: run the agent again with `args`, in a terminal. */
+export interface LoginMethod {
+  readonly id: string;
+  readonly name: string;
+  readonly args: readonly string[];
+}
+
+/**
+ * The agent's terminal sign-in, from `initialize`'s `authMethods` (ACP): a method of type
+ * `terminal` whose `args` are strings, the driver's preferred one first. `undefined` when it
+ * offers none. The arguments are the agent's own, never written here, so a new version of the
+ * agent that changes its login command changes what the panel runs.
+ */
+export function loginMethodOf(initialized: unknown, preferred?: string): LoginMethod | undefined {
+  const methods = (initialized as { authMethods?: unknown } | null)?.authMethods;
+  if (!Array.isArray(methods)) return undefined;
+  const usable = methods
+    .map((method) => method as { id?: unknown; name?: unknown; type?: unknown; args?: unknown })
+    .filter(
+      (method) =>
+        method.type === 'terminal' &&
+        typeof method.id === 'string' &&
+        Array.isArray(method.args) &&
+        method.args.every((arg) => typeof arg === 'string'),
+    )
+    .map((method) => ({
+      id: method.id as string,
+      name: typeof method.name === 'string' ? method.name : (method.id as string),
+      args: method.args as string[],
+    }));
+  return usable.find((method) => method.id === preferred) ?? usable[0];
+}
+
+/** What `login` answers: the tab opened, or why not, as a code the page says in its language. */
+export interface LoginAnswer {
+  readonly opened: boolean;
+  readonly code?: 'no-method' | 'already-open' | 'restricted' | 'no-terminal' | 'failed';
+  readonly reason?: string;
 }
 
 /**
@@ -129,8 +174,8 @@ export function startProblem(choice: AgentChoice, cause: unknown): Problem {
       return {
         kind: 'not-installed',
         message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
-        steps: [...driver.install, `then sign in once: ${driver.login.join(' ')}`],
-        params: { label: driver.label, program: driver.program, login: driver.login.join(' ') },
+        steps: [...driver.install],
+        params: { label: driver.label, program: driver.program },
       };
     case 'E_PROCESS_RESTRICTED':
       return {
@@ -151,13 +196,27 @@ export function startProblem(choice: AgentChoice, cause: unknown): Problem {
   }
 }
 
-export function loginProblem(choice: AgentChoice): Problem {
-  return {
-    kind: 'not-logged-in',
-    message: `${choice.driver.label} is not signed in. It uses its own login: Tyto never sees or stores it.`,
-    steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(' ')}`],
-    params: { label: choice.driver.label, login: choice.driver.login.join(' ') },
-  };
+/**
+ * The agent asked for authentication. With a terminal sign-in to offer, the page shows **Log in**
+ * (`canLogIn`); without one it says the agent offers none, and names no command of its own.
+ */
+export function loginProblem(choice: AgentChoice, method: LoginMethod | undefined): Problem {
+  const label = choice.driver.label;
+  return method === undefined
+    ? {
+        kind: 'not-logged-in',
+        message: `${label} is not signed in, and its adapter offers no sign-in Tyto can open in a terminal. Sign ${label} in yourself, then press New. Tyto never sees or stores the login.`,
+        steps: [],
+        params: { label },
+        canLogIn: false,
+      }
+    : {
+        kind: 'not-logged-in',
+        message: `${label} is not signed in. Log in opens a Tyto terminal where ${label}'s own sign-in runs and your browser opens on its page; Tyto never sees or stores the login.`,
+        steps: [],
+        params: { label },
+        canLogIn: true,
+      };
 }
 
 /** The name Tyto gives the window's MCP server (Tyto ADR 0183, `WINDOW_AGENT_SERVER_NAME`). */
@@ -256,11 +315,16 @@ export interface Conversation {
   cancel(): Promise<void>;
   /** Ends the agent and forgets the conversation; the next message starts a fresh one. */
   reset(): Promise<void>;
+  /**
+   * Opens a Tyto terminal running the agent's own sign-in (Tyto ADR 0184): the agent's program
+   * with the arguments its `initialize` offered. The plugin never sees what runs there.
+   */
+  login(): Promise<LoginAnswer>;
   status(): Status;
 }
 
 export function conversation(
-  host: Pick<PluginHost, 'config' | 'process' | 'window' | 'cache' | 'log'>,
+  host: Pick<PluginHost, 'config' | 'process' | 'window' | 'cache' | 'log' | 'terminal'>,
 ): Conversation {
   const entries: Entry[] = [];
   let seq = 0;
@@ -270,6 +334,8 @@ export function conversation(
   let problem: Problem | null = null;
   let window: WindowReach = 'unknown';
   let folder: string | null = null;
+  /** The agent's terminal sign-in, from its last `initialize`. */
+  let loginMethod: LoginMethod | undefined;
   let messages: HistoryMessage[] = [];
   let reply = '';
   const permissions = new Map<string, (optionId: string | null) => void>();
@@ -411,6 +477,17 @@ export function conversation(
     });
     connection.handle('session/update', update);
     connection.handle('session/request_permission', askPermission);
+    let signedOut = false;
+    const auth = choice.driver.authReport;
+    if (auth !== undefined) {
+      connection.handle(auth.notification, (params) => {
+        const said = auth.signedOut(params);
+        if (said === undefined) return;
+        signedOut = said;
+        if (said) problem = loginProblem(choice, loginMethod);
+        else if (problem?.kind === 'not-logged-in') problem = null;
+      });
+    }
     const report = choice.driver.serverReport;
     if (report !== undefined) {
       connection.handle(report.notification, (params) => {
@@ -444,11 +521,18 @@ export function conversation(
       }
     });
     try {
-      await connection.request('initialize', {
+      // `auth.terminal`: this client can run an agent's sign-in in a terminal, so the agent
+      // lists its terminal methods in `authMethods` (TYTO-657).
+      const initialized = await connection.request('initialize', {
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          auth: { terminal: true },
+        },
         clientInfo: CLIENT_INFO,
       });
+      loginMethod = loginMethodOf(initialized, choice.driver.preferredLogin);
       const created = (await connection.request('session/new', {
         cwd: program.cwd,
         mcpServers: await windowServers(),
@@ -456,14 +540,15 @@ export function conversation(
       })) as { sessionId?: unknown } | null;
       if (typeof created?.sessionId !== 'string')
         throw new Error('session/new answered no sessionId');
-      problem = null;
+      // A session can open signed out (Claude's adapter does): the agent's own report decides.
+      problem = signedOut ? loginProblem(choice, loginMethod) : null;
       // A cache that cannot be read costs the earlier messages, never the conversation.
       messages = [...(await loadHistory(host, program.cwd).catch(() => []))];
       return { program, connection, sessionId: created.sessionId, choice };
     } catch (cause) {
       problem =
         cause instanceof RpcError && cause.code === AUTH_REQUIRED
-          ? loginProblem(choice)
+          ? loginProblem(choice, loginMethod)
           : { kind: 'failed', message: messageOf(cause), steps: [] };
       await program.kill();
       return undefined;
@@ -497,7 +582,7 @@ export function conversation(
       push({ kind: 'end', reason: String(answer?.stopReason ?? 'end_turn') });
     } catch (cause) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
-        problem = loginProblem(chosenAgent(host));
+        problem = loginProblem(chosenAgent(host), loginMethod);
       } else {
         const said = messageOf(cause);
         push({
@@ -520,6 +605,13 @@ export function conversation(
 
   return {
     async open() {
+      // Signed out, the page's next `open` is a try again: the agent starts afresh and reads its
+      // login anew, which a session opened before the person signed in would not.
+      if (problem?.kind === 'not-logged-in' && running !== undefined) {
+        const ending = running;
+        running = undefined;
+        await ending.program.kill();
+      }
       await ensure();
       return { ...status(), history: messages };
     },
@@ -567,6 +659,26 @@ export function conversation(
       problem = null;
       window = 'unknown';
       if (ending !== undefined) await ending.program.kill();
+    },
+    async login() {
+      const method = loginMethod;
+      if (method === undefined) return { opened: false, code: 'no-method' };
+      const choice = chosenAgent(host);
+      try {
+        await host.terminal.open(choice.driver.program, [...choice.args, ...method.args]);
+        return { opened: true };
+      } catch (cause) {
+        switch (codeOf(cause)) {
+          case 'E_TERMINAL_LIMIT':
+            return { opened: false, code: 'already-open' };
+          case 'E_PROCESS_RESTRICTED':
+            return { opened: false, code: 'restricted' };
+          case 'E_TERMINAL_UNAVAILABLE':
+            return { opened: false, code: 'no-terminal' };
+          default:
+            return { opened: false, code: 'failed', reason: messageOf(cause) };
+        }
+      }
     },
     status,
   };

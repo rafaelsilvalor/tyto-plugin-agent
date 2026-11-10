@@ -307,15 +307,66 @@ function problemWords(problem) {
   const words = say();
   const params = problem.params;
   const known = params === undefined ? undefined : words.problems[problem.kind];
-  const message = known === undefined ? problem.message : known(params);
-  let steps = problem.steps;
-  if (params?.login !== undefined && problem.kind === 'not-installed') {
-    steps = [...steps.slice(0, -1), words.signInOnce(params.login)];
-  } else if (params?.login !== undefined && problem.kind === 'not-logged-in') {
-    steps = [words.openTerminal(params.login)];
-  }
-  return { message, steps };
+  const message =
+    known === undefined ? problem.message : known({ ...params, canLogIn: problem.canLogIn });
+  return { message, steps: problem.steps };
 }
+
+/**
+ * Whether the person went to sign in from this panel (TYTO-657): the panel then tries again when
+ * they come back to it, and says so once it worked.
+ */
+let signingIn = false;
+
+/** Opens the agent's own sign-in in a Tyto terminal; the plugin never sees what runs there. */
+async function logIn() {
+  try {
+    const answer = await call('login');
+    if (answer.opened) {
+      signingIn = true;
+      append(element('div', 'notice', say().loginOpened));
+      return;
+    }
+    const refused = say().loginRefusals[answer.code];
+    append(
+      element(
+        'div',
+        'notice',
+        typeof refused === 'function' ? refused(answer.reason ?? '') : (refused ?? answer.reason),
+      ),
+    );
+  } catch (cause) {
+    append(element('div', 'notice', say().unreachable(cause.message)));
+  }
+}
+
+/** Starts the agent again after a sign-in, and says whether it is signed in now. */
+async function tryAgain() {
+  try {
+    const status = await call('open');
+    showStatus(status);
+    if (status.problem === null) {
+      signingIn = false;
+      shownProblem = null;
+      append(element('div', 'notice', say().signedIn(status.agent)));
+    } else {
+      // Said again at the bottom, so a press of Try again that changed nothing still answers.
+      shownProblem = null;
+      showProblem(status.problem);
+    }
+  } catch (cause) {
+    append(element('div', 'notice', say().unreachable(cause.message)));
+  }
+}
+
+// Coming back to the panel after signing in: the person clicks into it, or the window returns.
+const cameBack = () => {
+  if (signingIn && lastStatus?.problem?.kind === 'not-logged-in') void tryAgain();
+};
+window.addEventListener('focus', cameBack);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') cameBack();
+});
 
 /** Shows the status's problem once; `again` redraws the one shown, in another language. */
 function showProblem(problem, again = false) {
@@ -327,6 +378,15 @@ function showProblem(problem, again = false) {
   const box = element('div', 'problem');
   showMarkdown(box.appendChild(element('div', 'said')), message);
   for (const step of steps) box.appendChild(element('code', '', step));
+  if (problem.kind === 'not-logged-in' && problem.canLogIn === true) {
+    const choices = element('div', 'choices');
+    const login = element('button', 'primary', say().logIn(problem.params?.label ?? ''));
+    login.addEventListener('click', () => void logIn());
+    const retry = element('button', '', say().tryAgain);
+    retry.addEventListener('click', () => void tryAgain());
+    choices.append(login, retry);
+    box.appendChild(choices);
+  }
   if (again && problemBox !== null && problemBox.isConnected) problemBox.replaceWith(box);
   else append(box);
   problemBox = box;

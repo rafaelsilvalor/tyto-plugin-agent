@@ -115,6 +115,14 @@ function connect(transport, options = {}) {
 }
 
 // src/drivers.ts
+var CLAUDE_AUTH_REPORT = {
+  notification: "_auth/status_update",
+  signedOut(params) {
+    const kind = params?.authStatus?.kind;
+    if (kind === "none") return true;
+    return typeof kind === "string" ? false : void 0;
+  }
+};
 var CLAUDE_SERVER_REPORT = {
   sessionMeta: { claudeCode: { emitRawSDKMessages: [{ type: "system", subtype: "init" }] } },
   notification: "_claude/sdkMessage",
@@ -140,8 +148,10 @@ var DRIVERS = [
     program: "claude-agent-acp",
     args: [],
     install: ["npm install -g @agentclientprotocol/claude-agent-acp"],
-    login: ["claude", "/login"],
-    serverReport: CLAUDE_SERVER_REPORT
+    // The adapter's subscription sign-in: it runs the Claude CLI's own login (TYTO-657).
+    preferredLogin: "claude-ai-login",
+    serverReport: CLAUDE_SERVER_REPORT,
+    authReport: CLAUDE_AUTH_REPORT
   }
 ];
 var SETTINGS = [
@@ -200,6 +210,18 @@ async function saveHistory(host, folder, messages) {
 }
 
 // src/conversation.ts
+function loginMethodOf(initialized, preferred) {
+  const methods = initialized?.authMethods;
+  if (!Array.isArray(methods)) return void 0;
+  const usable = methods.map((method) => method).filter(
+    (method) => method.type === "terminal" && typeof method.id === "string" && Array.isArray(method.args) && method.args.every((arg) => typeof arg === "string")
+  ).map((method) => ({
+    id: method.id,
+    name: typeof method.name === "string" ? method.name : method.id,
+    args: method.args
+  }));
+  return usable.find((method) => method.id === preferred) ?? usable[0];
+}
 var READ_LIMIT = 200;
 var PROTOCOL_VERSION = 1;
 var CLIENT_INFO = { name: "tyto-plugin-agent", version: "0.1.0" };
@@ -217,8 +239,8 @@ function startProblem(choice, cause) {
       return {
         kind: "not-installed",
         message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
-        steps: [...driver.install, `then sign in once: ${driver.login.join(" ")}`],
-        params: { label: driver.label, program: driver.program, login: driver.login.join(" ") }
+        steps: [...driver.install],
+        params: { label: driver.label, program: driver.program }
       };
     case "E_PROCESS_RESTRICTED":
       return {
@@ -236,12 +258,20 @@ function startProblem(choice, cause) {
       return { kind: "failed", message: messageOf(cause), steps: [] };
   }
 }
-function loginProblem(choice) {
-  return {
+function loginProblem(choice, method) {
+  const label = choice.driver.label;
+  return method === void 0 ? {
     kind: "not-logged-in",
-    message: `${choice.driver.label} is not signed in. It uses its own login: Tyto never sees or stores it.`,
-    steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(" ")}`],
-    params: { label: choice.driver.label, login: choice.driver.login.join(" ") }
+    message: `${label} is not signed in, and its adapter offers no sign-in Tyto can open in a terminal. Sign ${label} in yourself, then press New. Tyto never sees or stores the login.`,
+    steps: [],
+    params: { label },
+    canLogIn: false
+  } : {
+    kind: "not-logged-in",
+    message: `${label} is not signed in. Log in opens a Tyto terminal where ${label}'s own sign-in runs and your browser opens on its page; Tyto never sees or stores the login.`,
+    steps: [],
+    params: { label },
+    canLogIn: true
   };
 }
 var WINDOW_SERVER = "tyto";
@@ -304,6 +334,7 @@ function conversation(host) {
   let problem = null;
   let window = "unknown";
   let folder = null;
+  let loginMethod;
   let messages = [];
   let reply = "";
   const permissions = /* @__PURE__ */ new Map();
@@ -426,6 +457,17 @@ function conversation(host) {
     });
     connection.handle("session/update", update);
     connection.handle("session/request_permission", askPermission);
+    let signedOut = false;
+    const auth = choice.driver.authReport;
+    if (auth !== void 0) {
+      connection.handle(auth.notification, (params) => {
+        const said = auth.signedOut(params);
+        if (said === void 0) return;
+        signedOut = said;
+        if (said) problem = loginProblem(choice, loginMethod);
+        else if (problem?.kind === "not-logged-in") problem = null;
+      });
+    }
     const report = choice.driver.serverReport;
     if (report !== void 0) {
       connection.handle(report.notification, (params) => {
@@ -458,11 +500,16 @@ function conversation(host) {
       }
     });
     try {
-      await connection.request("initialize", {
+      const initialized = await connection.request("initialize", {
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+          auth: { terminal: true }
+        },
         clientInfo: CLIENT_INFO
       });
+      loginMethod = loginMethodOf(initialized, choice.driver.preferredLogin);
       const created = await connection.request("session/new", {
         cwd: program.cwd,
         mcpServers: await windowServers(),
@@ -470,11 +517,11 @@ function conversation(host) {
       });
       if (typeof created?.sessionId !== "string")
         throw new Error("session/new answered no sessionId");
-      problem = null;
+      problem = signedOut ? loginProblem(choice, loginMethod) : null;
       messages = [...await loadHistory(host, program.cwd).catch(() => [])];
       return { program, connection, sessionId: created.sessionId, choice };
     } catch (cause) {
-      problem = cause instanceof RpcError && cause.code === AUTH_REQUIRED ? loginProblem(choice) : { kind: "failed", message: messageOf(cause), steps: [] };
+      problem = cause instanceof RpcError && cause.code === AUTH_REQUIRED ? loginProblem(choice, loginMethod) : { kind: "failed", message: messageOf(cause), steps: [] };
       await program.kill();
       return void 0;
     }
@@ -503,7 +550,7 @@ function conversation(host) {
       push({ kind: "end", reason: String(answer?.stopReason ?? "end_turn") });
     } catch (cause) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
-        problem = loginProblem(chosenAgent(host));
+        problem = loginProblem(chosenAgent(host), loginMethod);
       } else {
         const said = messageOf(cause);
         push({
@@ -525,6 +572,11 @@ function conversation(host) {
   }
   return {
     async open() {
+      if (problem?.kind === "not-logged-in" && running !== void 0) {
+        const ending = running;
+        running = void 0;
+        await ending.program.kill();
+      }
       await ensure();
       return { ...status(), history: messages };
     },
@@ -573,6 +625,26 @@ function conversation(host) {
       window = "unknown";
       if (ending !== void 0) await ending.program.kill();
     },
+    async login() {
+      const method = loginMethod;
+      if (method === void 0) return { opened: false, code: "no-method" };
+      const choice = chosenAgent(host);
+      try {
+        await host.terminal.open(choice.driver.program, [...choice.args, ...method.args]);
+        return { opened: true };
+      } catch (cause) {
+        switch (codeOf(cause)) {
+          case "E_TERMINAL_LIMIT":
+            return { opened: false, code: "already-open" };
+          case "E_PROCESS_RESTRICTED":
+            return { opened: false, code: "restricted" };
+          case "E_TERMINAL_UNAVAILABLE":
+            return { opened: false, code: "no-terminal" };
+          default:
+            return { opened: false, code: "failed", reason: messageOf(cause) };
+        }
+      }
+    },
     status
   };
 }
@@ -616,6 +688,8 @@ function activate(host) {
           case "reset":
             await chat.reset();
             return ok(chat.status());
+          case "login":
+            return ok(await chat.login());
           default:
             return ok({ unknown: method });
         }

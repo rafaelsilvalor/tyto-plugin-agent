@@ -11,7 +11,8 @@ import type { Browser, Frame } from 'playwright-core';
  * (`--tyto-plugin-page`), in a document whose scheme is `light dark`. It answers the page's
  * `call`s with what the test hands it: `open` with the status and the history, and the first
  * `read` with the entries, every later one with none. `send` is accepted and makes the status
- * busy; `send` and `cancel` are kept in `globalThis.calls` of the host page, for a test to read.
+ * busy; `send`, `cancel` and `login` are kept in `globalThis.calls` of the host page, for a test
+ * to read, and so is every `open` after a `login`, which answers `afterLogin` when given.
  * `tell` posts what Tyto's window posts unasked (`document`, `language`).
  */
 
@@ -27,6 +28,10 @@ export interface PageScript {
   readonly height?: number;
   /** The browser's language, which the page falls back to when Tyto says none. */
   readonly locale?: string;
+  /** What `login` answers; `{ opened: true }` when absent. */
+  readonly login?: Record<string, unknown>;
+  /** The status `open` answers once `login` was called: the person signed in meanwhile. */
+  readonly afterLogin?: Record<string, unknown>;
 }
 
 function host(script: PageScript): string {
@@ -41,8 +46,14 @@ let status = ${JSON.stringify(script.status)};
 globalThis.calls = [];
 const history = ${JSON.stringify(script.history ?? [])};
 let entries = ${JSON.stringify(script.entries ?? [])};
+const login = ${JSON.stringify(script.login ?? { opened: true })};
+const afterLogin = ${JSON.stringify(script.afterLogin ?? null)};
 const answers = {
-  open: () => ({ ...status, history }),
+  open: () => {
+    if (calls.some((c) => c[0] === 'login')) { calls.push(['open']); if (afterLogin) status = afterLogin; }
+    return { ...status, history };
+  },
+  login: () => { calls.push(['login']); return login; },
   read: () => { const sent = entries; entries = []; return { entries: sent, status }; },
   send: (params) => { calls.push(['send', params.text]); status = { ...status, busy: true }; return { accepted: true }; },
   cancel: () => { calls.push(['cancel']); return status; },

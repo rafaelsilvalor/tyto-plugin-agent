@@ -17,10 +17,10 @@ import { openPanelPage, tell } from './panel-page.js';
  */
 
 const PROBLEM = {
-  kind: 'not-logged-in',
-  message: 'Claude is not signed in. It uses its own login: Tyto never sees or stores it.',
-  steps: ['open a terminal in Tyto and run: claude /login'],
-  params: { label: 'Claude', login: 'claude /login' },
+  kind: 'not-installed',
+  message: "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
+  steps: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+  params: { label: 'Claude', program: 'claude-agent-acp' },
 };
 const STATUS = {
   agent: 'Claude',

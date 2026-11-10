@@ -18,15 +18,45 @@ export interface Driver {
   readonly args: readonly string[];
   /** What the person runs to install the program, shown when it is missing. */
   readonly install: readonly string[];
-  /** What the person runs to sign in, shown when the agent asks for authentication. */
-  readonly login: readonly string[];
+  /**
+   * The sign-in the panel prefers among the agent's own terminal methods (ACP `authMethods` of
+   * type `terminal`, read from `initialize`). The arguments always come from the agent, so they
+   * follow its version; a missing id falls back to its first terminal method.
+   */
+  readonly preferredLogin?: string;
   /**
    * How this agent says which MCP servers its session ended up with, when it can. ACP has no
    * message for it, so it is the adapter's own extension, and an agent without one is never
    * checked (Tyto's tools may be missing, and the panel cannot tell).
    */
   readonly serverReport?: ServerReport;
+  /**
+   * How this agent says it is signed out before a turn fails, when it can: an extension
+   * notification read for its kind only. The panel then offers Log in when it opens, not after
+   * the first message.
+   */
+  readonly authReport?: AuthReport;
 }
+
+export interface AuthReport {
+  readonly notification: string;
+  /** `true` signed out, `false` signed in, `undefined` when this notification does not say. */
+  signedOut(params: unknown): boolean | undefined;
+}
+
+/**
+ * Claude's adapter sends `_auth/status_update` after `initialize` (measured with 0.102.0 on
+ * 2026-11-10, in a signed-out profile: `authStatus.kind` is `none`; signed in it is `account`).
+ * Only the kind is read: the notification also names the account, which is never kept or logged.
+ */
+const CLAUDE_AUTH_REPORT: AuthReport = {
+  notification: '_auth/status_update',
+  signedOut(params) {
+    const kind = (params as { authStatus?: { kind?: unknown } } | null)?.authStatus?.kind;
+    if (kind === 'none') return true;
+    return typeof kind === 'string' ? false : undefined;
+  },
+};
 
 /** One MCP server as the agent reports it: its name, and how its connection went. */
 export interface ReportedServer {
@@ -81,8 +111,10 @@ export const DRIVERS: readonly Driver[] = [
     program: 'claude-agent-acp',
     args: [],
     install: ['npm install -g @agentclientprotocol/claude-agent-acp'],
-    login: ['claude', '/login'],
+    // The adapter's subscription sign-in: it runs the Claude CLI's own login (TYTO-657).
+    preferredLogin: 'claude-ai-login',
     serverReport: CLAUDE_SERVER_REPORT,
+    authReport: CLAUDE_AUTH_REPORT,
   },
 ];
 
