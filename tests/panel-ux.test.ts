@@ -285,10 +285,11 @@ describe('the language', () => {
       status: {
         ...STATUS,
         problem: {
-          kind: 'not-logged-in',
-          message: 'Claude is not signed in. It uses its own login: Tyto never sees or stores it.',
-          steps: ['open a terminal in Tyto and run: claude /login'],
-          params: { label: 'Claude', login: 'claude /login' },
+          kind: 'not-installed',
+          message:
+            "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
+          steps: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+          params: { label: 'Claude', program: 'claude-agent-acp' },
         },
       },
       entries: [
@@ -305,10 +306,10 @@ describe('the language', () => {
     await frame.waitForSelector('.notice');
     await frame.waitForSelector('.problem');
     expect(await textOf(frame, '.problem .said')).toBe(
-      'O Claude não está conectado. Ele usa o próprio login: o Tyto nunca o vê nem o guarda.',
+      'O adaptador ACP do Claude, claude-agent-acp, não está no seu PATH. O Tyto não instala agentes.',
     );
     expect(await textOf(frame, '.problem code')).toBe(
-      'abra um terminal no Tyto e rode: claude /login',
+      'npm install -g @agentclientprotocol/claude-agent-acp',
     );
     expect(await textOf(frame, '.notice')).toBe(
       'O agente encerrou (saída 1). A sua próxima mensagem o inicia de novo.',
@@ -319,7 +320,7 @@ describe('the language', () => {
     await waitForText(
       frame,
       '.problem .said',
-      'Claude is not signed in. It uses its own login: Tyto never sees or stores it.',
+      "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
     );
     expect(
       await frame.evaluate(
@@ -331,5 +332,79 @@ describe('the language', () => {
           ).document.querySelectorAll('.problem').length,
       ),
     ).toBe(1);
+  });
+});
+
+describe('signing in (TYTO-657)', () => {
+  const SIGNED_OUT = {
+    ...STATUS,
+    busy: false,
+    running: false,
+    problem: {
+      kind: 'not-logged-in',
+      message: 'Claude is not signed in.',
+      steps: [],
+      params: { label: 'Claude' },
+      canLogIn: true,
+    },
+  };
+
+  it('opens the sign-in from Log in, then tries again when the person comes back', async () => {
+    const frame = await openPanelPage(browser, {
+      status: SIGNED_OUT,
+      afterLogin: { ...SIGNED_OUT, running: true, problem: null },
+    });
+    await frame.waitForSelector('.problem .choices button.primary');
+    expect(await textOf(frame, '.problem .choices button.primary')).toBe('Log in to Claude');
+    await frame.click('.problem .choices button.primary');
+    await waitForText(
+      frame,
+      '.notice',
+      'The sign-in runs in the Terminal tab below. Finish it in your browser, then come back here: the panel tries again by itself.',
+    );
+    // The person comes back to the panel: the page asks the agent again, unprompted.
+    await frame.evaluate(() => {
+      (globalThis as unknown as { dispatchEvent(event: unknown): void }).dispatchEvent(
+        new (globalThis as unknown as { Event: new (type: string) => unknown }).Event('focus'),
+      );
+    });
+    await frame.waitForFunction(() =>
+      Array.from(
+        (
+          globalThis as unknown as {
+            document: { querySelectorAll(selector: string): ArrayLike<{ textContent: string }> };
+          }
+        ).document.querySelectorAll('.notice'),
+      ).some((node) => node.textContent === 'Claude is signed in.'),
+    );
+    const calls = await callsOf(frame);
+    const login = calls.findIndex((call) => call[0] === 'login');
+    expect(login).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(login + 1).some((call) => call[0] === 'open')).toBe(true);
+  });
+
+  it('says the refusal in Portuguese when a sign-in terminal is already open', async () => {
+    const frame = await openPanelPage(browser, {
+      status: SIGNED_OUT,
+      login: { opened: false, code: 'already-open' },
+      locale: 'pt-BR',
+    });
+    await frame.waitForSelector('.problem .choices button.primary');
+    expect(await textOf(frame, '.problem .choices button.primary')).toBe('Entrar no Claude');
+    await frame.click('.problem .choices button.primary');
+    await waitForText(
+      frame,
+      '.notice',
+      'Já há um terminal de login aberto. Termine nele, ou feche aquela aba e clique em Entrar de novo.',
+    );
+  });
+
+  it('offers no button when the adapter offers no terminal sign-in', async () => {
+    const frame = await openPanelPage(browser, {
+      status: { ...SIGNED_OUT, problem: { ...SIGNED_OUT.problem, canLogIn: false } },
+    });
+    await frame.waitForSelector('.problem .said');
+    expect(await textOf(frame, '.problem .said')).toContain('offers no sign-in Tyto can open');
+    expect(await frame.$('.problem .choices')).toBeNull();
   });
 });

@@ -33,6 +33,7 @@ function stringOf(value: unknown): string {
  *   `optionId` cancels it.
  * - `cancel`: stop the running turn.
  * - `reset`: end the agent and start the next message in a fresh conversation.
+ * - `login`: open a Tyto terminal running the agent's own sign-in, as its `initialize` offered.
  */
 export function activate(host: PluginHost): Disposable {
   const chat = conversation(host);
@@ -65,6 +66,8 @@ export function activate(host: PluginHost): Disposable {
           case 'reset':
             await chat.reset();
             return ok(chat.status());
+          case 'login':
+            return ok(await chat.login());
           default:
             return ok({ unknown: method });
         }

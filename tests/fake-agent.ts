@@ -41,8 +41,22 @@ export interface TurnTools {
 export interface FakeAgentOptions {
   /** The host refuses the start with this code, as the desktop's adapter would. */
   readonly refuse?: 'E_PROCESS_NOT_FOUND' | 'E_PROCESS_RESTRICTED';
-  /** `session/new` answers ACP's "authentication required". */
+  /** `session/new` answers ACP's "authentication required", until the test calls `signIn`. */
   readonly signedOut?: boolean;
+  /**
+   * What `initialize` lists in `authMethods`. Absent, the methods Claude's adapter lists (read
+   * in 0.102.0, measured on 2026-11-10), and only to a client that sent `auth.terminal: true`,
+   * as the adapter does.
+   */
+  readonly authMethods?: readonly unknown[];
+  /**
+   * As Claude's adapter does (measured with 0.102.0 on 2026-11-10): `_auth/status_update` after
+   * `initialize`, `session/new` opens a session even signed out, and the first `session/prompt`
+   * answers "authentication required".
+   */
+  readonly reportsAuth?: boolean;
+  /** The host refuses `host.terminal.open` with this code. */
+  readonly refuseTerminal?: 'E_TERMINAL_LIMIT' | 'E_PROCESS_RESTRICTED' | 'E_TERMINAL_UNAVAILABLE';
   /** `session/prompt` answers ACP's "authentication required": a login that expired. */
   readonly expiresAtPrompt?: boolean;
   /** The window's server, or the code `host.window.agentServer()` refuses with. */
@@ -66,7 +80,29 @@ export interface FakeAgent {
   readonly killed: () => number;
   /** The plugin's private cache, shared across conversations of one test. */
   readonly cache: Map<string, Uint8Array>;
+  /** Every terminal the plugin asked the host to open: its program and arguments. */
+  readonly terminals: { program: string; args: readonly string[] }[];
+  /** The person finished signing in: from now on `session/new` answers a session. */
+  signIn(): void;
 }
+
+/** The terminal methods Claude's adapter lists to a client that can run them. */
+export const CLAUDE_AUTH_METHODS = [
+  {
+    id: 'claude-ai-login',
+    name: 'Claude Subscription',
+    description: 'Use Claude subscription ',
+    type: 'terminal',
+    args: ['--cli', 'auth', 'login', '--claudeai'],
+  },
+  {
+    id: 'console-login',
+    name: 'Anthropic Console',
+    description: 'Use Anthropic Console (API usage billing)',
+    type: 'terminal',
+    args: ['--cli', 'auth', 'login', '--console'],
+  },
+];
 
 function refusal(code: string): PluginCapabilityError {
   return new PluginCapabilityError({
@@ -89,6 +125,8 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
   const started: { program: string; args: readonly string[] }[] = [];
   const heard: { method: string; params: unknown }[] = [];
   const cache = new Map<string, Uint8Array>();
+  const terminals: { program: string; args: readonly string[] }[] = [];
+  let signedIn = options.signedOut !== true;
   let kills = 0;
 
   function run(events: ProcessEvents): StartedProcess {
@@ -174,10 +212,26 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
       }
       heard.push({ method: message.method, params: message.params });
       if (message.method === 'initialize') {
+        const asked = (message.params as { clientCapabilities?: { auth?: { terminal?: unknown } } })
+          .clientCapabilities?.auth?.terminal;
         say({
           id: message.id,
-          result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] },
+          result: {
+            protocolVersion: 1,
+            agentCapabilities: {},
+            authMethods: options.authMethods ?? (asked === true ? CLAUDE_AUTH_METHODS : []),
+          },
         });
+        if (options.reportsAuth === true) {
+          say({
+            method: '_auth/status_update',
+            params: {
+              authStatus: signedIn
+                ? { kind: 'account', label: 'Claude Team', account: { email: 'ana@example.com' } }
+                : { kind: 'none' },
+            },
+          });
+        }
       } else if (message.method === 'session/new') {
         const meta = (message.params as { _meta?: { claudeCode?: Record<string, unknown> } })._meta;
         const asked = meta?.claudeCode?.['emitRawSDKMessages'];
@@ -189,12 +243,15 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
                 filter.type === 'system' &&
                 (filter.subtype === undefined || filter.subtype === 'init'),
             ));
-        if (options.signedOut === true) {
+        if (!signedIn && options.reportsAuth !== true) {
           say({ id: message.id, error: { code: -32000, message: 'Authentication required' } });
         } else {
           say({ id: message.id, result: { sessionId: 'session-1' } });
         }
-      } else if (message.method === 'session/prompt' && options.expiresAtPrompt === true) {
+      } else if (
+        message.method === 'session/prompt' &&
+        (options.expiresAtPrompt === true || (options.reportsAuth === true && !signedIn))
+      ) {
         say({ id: message.id, error: { code: -32000, message: 'Authentication required' } });
       } else if (message.method === 'session/prompt') {
         void prompt(
@@ -233,8 +290,19 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
     started,
     heard,
     cache,
+    terminals,
+    signIn: () => {
+      signedIn = true;
+    },
     killed: () => kills,
     capabilities: {
+      openTerminal: (_plugin, program, args) => {
+        if (options.refuseTerminal !== undefined) {
+          return Promise.reject(refusal(options.refuseTerminal));
+        }
+        terminals.push({ program, args });
+        return Promise.resolve({ closed: new Promise<void>(() => undefined) });
+      },
       startProcess: (_plugin, program, args, events) => {
         if (options.refuse !== undefined) return Promise.reject(refusal(options.refuse));
         started.push({ program, args });

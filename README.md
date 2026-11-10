@@ -30,14 +30,20 @@ own repository, and reaches Tyto only through the plugin API.
 
 You need, on the computer that runs Tyto:
 
-1. **Tyto desktop 0.17.0 or newer** (it carries the plugin contract 0.16 this plugin asks for).
-2. **Claude Code**, signed in once: run `claude`, then `/login`.
+1. **Tyto desktop 0.18.0 or newer**: it carries the plugin contract 0.17 this plugin asks for
+   (`engine: ">=0.17"`), with the terminal a plugin can open for a sign-in (Tyto ADR 0184). An
+   older Tyto refuses the plugin at start and says which contract it needs.
+2. **Claude Code.** You do not have to sign in first: the panel offers **Log in** (below).
 3. **The ACP adapter for Claude Code** (Apache-2.0,
    [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)):
 
    ```
    npm install -g @agentclientprotocol/claude-agent-acp
    ```
+
+   It is not bundled into this plugin because one of its dependencies,
+   `@anthropic-ai/claude-agent-sdk`, is not under an open licence
+   ([its terms](https://code.claude.com/docs/en/legal-and-compliance)).
 
    **Tested with `@agentclientprotocol/claude-agent-acp` 0.102.0** (Claude Code 2.1.321). The
    panel's check that Claude has Tyto's tools reads that adapter's own extension (it forwards
@@ -56,9 +62,9 @@ approval.
 
 ### What it may reach
 
-| Permission                 | Why                                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------- |
-| `process:claude-agent-acp` | Start the adapter from your `PATH`, in the folder open in Tyto, and talk to it on stdio. |
+| Permission                 | Why                                                                                                                               |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `process:claude-agent-acp` | Start the adapter from your `PATH`, in the folder open in Tyto, and talk to it on stdio; open a Terminal tab running its sign-in. |
 
 Tyto starts that one program and nothing else, never while the folder is restricted, and ends it
 when you open another folder, change the folder's trust, or close the window. The program runs
@@ -73,10 +79,22 @@ the folder open in Tyto, and the panel says what it found:
 | What the panel says                       | What to do                                                                                      |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | the adapter is not on your `PATH`         | install it (above), then press **New**                                                          |
-| Claude is not signed in                   | open a terminal in Tyto, run `claude`, then `/login`, then press **New**                        |
+| Claude is not signed in                   | press **Log in to Claude** (below); press **Try again** if the panel has not noticed            |
 | the folder is restricted                  | trust the folder; Tyto starts no program in a restricted one                                    |
 | `window off (agentsListen)` in the header | the agent chats but cannot see the brief or propose edits; turn `agentsListen` on, then **New** |
 | `no Tyto tools` in the header             | see [Claude without Tyto's tools](#claude-without-tytos-tools); Tyto cannot fix it              |
+
+### Signing in
+
+When Claude is not signed in, the panel says so as soon as it opens (the adapter reports it) or
+on the first message, and shows **Log in to Claude**. The button opens a tab in Tyto's Terminal,
+in the open folder, running the adapter with the sign-in arguments the adapter itself lists in
+ACP's `initialize` (`authMethods` of type `terminal`; with 0.102.0,
+`--cli auth login --claudeai`, which runs the Claude CLI's own login). Your browser opens on
+Claude's sign-in page; you finish there, and the terminal ends. Come back to the panel and it
+tries again by itself; **Try again** does the same. The plugin never sees what the terminal shows
+or what you type, and Tyto never reads or stores the login. An adapter that lists no terminal
+sign-in gets no button: the panel says so, and you sign Claude in yourself.
 
 ### Claude without Tyto's tools
 
@@ -130,9 +148,14 @@ In `settings.json`:
   `read {after}` answers the entries after the last one the page has, four times a second while
   a turn runs.
 - **Drivers.** `src/drivers.ts` names each agent: its program, its arguments, the steps the
-  panel shows to install it and sign in, and how it reports the session's MCP servers, when it
-  can (Claude: `_meta.claudeCode.emitRawSDKMessages` in `session/new`, then Claude Code's
-  `system`/`init` message as `_claude/sdkMessage` on the first turn).
+  panel shows to install it, which of its terminal sign-ins it prefers, how it reports being
+  signed out (Claude: `_auth/status_update`, read for its kind only), and how it reports the
+  session's MCP servers, when it can (Claude: `_meta.claudeCode.emitRawSDKMessages` in
+  `session/new`, then Claude Code's `system`/`init` message as `_claude/sdkMessage` on the first
+  turn).
+- **Sign-in through the host's terminal.** `host.terminal.open` (Tyto ADR 0184) runs the
+  driver's program with the agent's own sign-in arguments in a Tyto terminal tab; the plugin
+  learns only that it opened, one at a time.
 - **Markdown without HTML.** `panel/panel.js` builds every node with `createElement` and
   `textContent`, never `innerHTML`, so nothing an agent writes becomes markup.
 
