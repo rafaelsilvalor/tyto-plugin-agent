@@ -1,2 +1,4 @@
 dist/
 pnpm-lock.yaml
+adapter/launch.mjs
+adapter/lock.json

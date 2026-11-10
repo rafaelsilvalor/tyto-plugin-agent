@@ -34,7 +34,9 @@ const RUNTIME_GLOBALS = [
 ];
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**'] },
+  {
+    ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**', 'adapter/launch.mjs'],
+  },
 
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -57,7 +59,9 @@ export default tseslint.config(
   {
     name: 'boundary/plugin',
     files: ['src/**/*.ts'],
-    ignores: ['src/**/*.test.ts'],
+    // The launcher is a program on Tyto's Node, not the plugin's process (TYTO-666). Only its
+    // protocol, which the plugin imports, stays pure.
+    ignores: ['src/**/*.test.ts', 'src/launcher/!(protocol).ts'],
     languageOptions: { globals: {} },
     rules: {
       '@typescript-eslint/no-restricted-imports': [
@@ -85,7 +89,13 @@ export default tseslint.config(
 
   {
     name: 'node/tests-and-scripts',
-    files: ['src/**/*.test.ts', 'tests/**/*.ts', 'scripts/**/*.{js,mjs}', '*.config.{js,ts}'],
+    files: [
+      'src/**/*.test.ts',
+      'src/launcher/!(protocol).ts',
+      'tests/**/*.ts',
+      'scripts/**/*.{js,mjs}',
+      '*.config.{js,ts}',
+    ],
     languageOptions: { globals: globals.node },
   },
 

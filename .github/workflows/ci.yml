@@ -29,13 +29,15 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm build
-      # Tyto installs this folder as it is and never builds it, so the committed bundle must be
-      # exactly what `src/` builds to. `git status` rather than `git diff` alone, so a file the
-      # build adds and nobody committed fails too.
-      - name: dist is what src builds to
+      # Tyto installs this folder as it is and never builds it, so the committed bundles (the
+      # plugin's and its launcher's) must be exactly what `src/` builds to. `git status` rather
+      # than `git diff` alone, so a file the build adds and nobody committed fails too.
+      - name: dist and the launcher are what src builds to
         run: |
-          git status --porcelain dist
-          git diff --exit-code dist
-          test -z "$(git status --porcelain dist)"
-      # After the build: the tests load dist/index.js through the contract's harness.
+          git status --porcelain dist adapter
+          git diff --exit-code dist adapter
+          test -z "$(git status --porcelain dist adapter)"
+      # After the build: the tests load dist/index.js through the contract's harness, run the
+      # built launcher, and fail on any tracked file of Anthropic's Claude Agent SDK
+      # (tests/no-sdk.test.ts, TYTO-666).
       - run: pnpm test

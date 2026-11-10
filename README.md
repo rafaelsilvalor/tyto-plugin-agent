@@ -30,25 +30,36 @@ own repository, and reaches Tyto only through the plugin API.
 
 You need, on the computer that runs Tyto:
 
-1. **Tyto desktop 0.18.0 or newer**: it carries the plugin contract 0.17 this plugin asks for
-   (`engine: ">=0.17"`), with the terminal a plugin can open for a sign-in (Tyto ADR 0184). An
-   older Tyto refuses the plugin at start and says which contract it needs.
-2. **Claude Code.** You do not have to sign in first: the panel offers **Log in** (below).
-3. **The ACP adapter for Claude Code** (Apache-2.0,
-   [agentclientprotocol/claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)):
+1. **Tyto desktop with the plugin contract 0.18 or newer** (`engine: ">=0.18"`): it runs the
+   plugin's own launcher on Tyto's Node (Tyto ADR 0184) and gives it a data folder (ADR 0187).
+   An older Tyto refuses the plugin at start and says which contract it needs.
+2. **Claude Code, installed natively**, so that `claude` (on Windows `claude.exe`) is on your
+   `PATH`. You do not have to sign in first: the panel offers **Log in** (below). An npm-only
+   install (`claude.cmd`) is refused with a message: the adapter cannot start a `.cmd`.
 
-   ```
-   npm install -g @agentclientprotocol/claude-agent-acp
-   ```
+Nothing else. **The ACP adapter is downloaded the first time you open the panel, as Zed does**,
+and only once you press **Download**. The panel first says what it fetches and from where:
+[`@agentclientprotocol/claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp)
+at the version this plugin pins (0.104.1 today), with its 107 npm packages, about 54 MB on disk,
+from `registry.npmjs.org`. They go into Tyto's data folder for this plugin
+(`~/.tyto/data/plugins/agent/`), never into this repository. Every package is checked against the
+sha512 hash `adapter/lock.json` records, and an install that fails leaves nothing behind. The
+SDK's own Claude binary (331 MB) is never downloaded: the adapter runs your `claude`.
 
-   It is not bundled into this plugin because one of its dependencies,
-   `@anthropic-ai/claude-agent-sdk`, is not under an open licence
-   ([its terms](https://code.claude.com/docs/en/legal-and-compliance)).
+**Licences.** The adapter is Apache-2.0. One of its dependencies,
+`@anthropic-ai/claude-agent-sdk`, is not open source: it is Anthropic's, under
+[Anthropic's terms](https://code.claude.com/docs/en/legal-and-compliance). That is why this
+repository holds none of it (a test fails on any SDK file or licence text tracked), and why you
+download it yourself from npm.
 
-   **Tested with `@agentclientprotocol/claude-agent-acp` 0.102.0** (Claude Code 2.1.321). The
-   panel's check that Claude has Tyto's tools reads that adapter's own extension (it forwards
-   Claude Code's startup message as `_claude/sdkMessage`); a version without it leaves the
-   panel unable to tell, and then it says nothing.
+**Updates.** Each release of this plugin pins one adapter version. When a new release pins a
+newer one, the panel downloads it the next time it opens, without asking again, and removes the
+old copy. An adapter you installed yourself with `npm i -g` is not used: the plugin always runs
+its own copy.
+
+The panel's check that Claude has Tyto's tools reads the adapter's own extension (it forwards
+Claude Code's startup message as `_claude/sdkMessage`); a version without it leaves the panel
+unable to tell, and then it says nothing.
 
 Then install the plugin straight from this repository:
 
@@ -62,11 +73,14 @@ approval.
 
 ### What it may reach
 
-| Permission                 | Why                                                                                                                               |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `process:claude-agent-acp` | Start the adapter from your `PATH`, in the folder open in Tyto, and talk to it on stdio; open a Terminal tab running its sign-in. |
+| Permission                 | Why                                                                                                                                                                                                                        |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `process:claude-agent-acp` | Run the plugin's own launcher (`adapter/launch.mjs`) on Tyto's Node, in the folder open in Tyto: it downloads the adapter when you accept, then runs it and talks to it on stdio; open a Terminal tab running its sign-in. |
 
-Tyto starts that one program and nothing else, never while the folder is restricted, and ends it
+The launcher is this plugin's own code, so the install box says it is not confined: its own
+downloads reach only `registry.npmjs.org`, for the files the lock pins, and it writes them only
+into the plugin's data folder. The adapter it then runs drives Claude Code, which reaches
+Anthropic as it does in a terminal. Tyto starts that one program and nothing else, never while the folder is restricted, and ends it
 when you open another folder, change the folder's trust, or close the window. The program runs
 with your rights. It can also reach the Tyto window as an agent while Tyto lets agents connect
 (setting `agentsListen`): it reads what is open there, and its edits arrive as proposals.
@@ -78,7 +92,9 @@ the folder open in Tyto, and the panel says what it found:
 
 | What the panel says                       | What to do                                                                                      |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| the adapter is not on your `PATH`         | install it (above), then press **New**                                                          |
+| the adapter is not downloaded yet         | read what it fetches, then press **Download**; the panel starts Claude once it is in            |
+| Claude Code is not installed              | install Claude Code natively, then press **New**                                                |
+| the download failed                       | nothing was installed; press **New** to try again                                               |
 | Claude is not signed in                   | press **Log in to Claude** (below); press **Try again** if the panel has not noticed            |
 | the folder is restricted                  | trust the folder; Tyto starts no program in a restricted one                                    |
 | `window off (agentsListen)` in the header | the agent chats but cannot see the brief or propose edits; turn `agentsListen` on, then **New** |
@@ -147,8 +163,17 @@ In `settings.json`:
   0173 decision 8), so a turn is started with one `call` and read with the next ones:
   `read {after}` answers the entries after the last one the page has, four times a second while
   a turn runs.
-- **Drivers.** `src/drivers.ts` names each agent: its program, its arguments, the steps the
-  panel shows to install it, which of its terminal sign-ins it prefers, how it reports being
+- **The launcher.** `src/launcher/` builds to `adapter/launch.mjs`, the program the manifest's
+  `programs` maps `claude-agent-acp` to (Tyto ADR 0184). `--tyto-status` says what is installed
+  in `TYTO_PROGRAM_DATA` (ADR 0187) and whether `claude` is on `PATH`; `--tyto-install` fetches
+  every package `adapter/lock.json` lists, checks its sha512, unpacks it with a tar reader that
+  refuses links, absolute paths and `..`, and renames the finished folder into place. Any other
+  arguments run the adapter with `CLAUDE_CODE_EXECUTABLE` set to your `claude`. The plugin's
+  own process only reads the launcher's JSON lines: it downloads nothing (ADR 0049).
+- **A new pin.** `node scripts/lock-adapter.mjs <version>` installs that version with npm in a
+  temporary folder (no optional packages, no install scripts) and rewrites `adapter/lock.json`
+  with each package's path, version, address and sha512, and the size on disk.
+- **Drivers.** `src/drivers.ts` names each agent: its program, its arguments, which of its terminal sign-ins it prefers, how it reports being
   signed out (Claude: `_auth/status_update`, read for its kind only), and how it reports the
   session's MCP servers, when it can (Claude: `_meta.claudeCode.emitRawSDKMessages` in
   `session/new`, then Claude Code's `system`/`init` message as `_claude/sdkMessage` on the first
@@ -172,7 +197,9 @@ pnpm check
 
 The tests run the committed bundle through Tyto's own harness (`testPlugin`, Tyto ADR 0150), with
 a fake ACP agent behind the host's process port (`tests/fake-agent.ts`). CI fails when
-`dist/` differs from a fresh build of `src/`. `tests/panel-theme.test.ts` renders the panel page
+`dist/` or `adapter/launch.mjs` differs from a fresh build of `src/`, and `tests/no-sdk.test.ts`
+fails on any tracked SDK file. `src/launcher/launcher.test.ts` installs from tarballs built in
+the test, on a temp disk; the registry is never reached. `tests/panel-theme.test.ts` renders the panel page
 in both themes and measures its contrast on pixels, in the system Chrome through `playwright-core`
 (no browser is downloaded; GitHub's Ubuntu runners carry Chrome). The `contract` workflow moves this repository onto
 each new contract (Tyto ADR 0154).

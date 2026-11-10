@@ -1,7 +1,9 @@
 import type { PluginHost, PluginProcess } from '@tyto/plugin-api';
 
 import { AUTH_REQUIRED, type Connection, RpcError, connect } from './acp/connection.js';
+import { type InstallOutcome, adapterStatus, installAdapter, megabytes } from './adapter.js';
 import { type AgentChoice, chosenAgent } from './drivers.js';
+import type { StatusLine } from './launcher/protocol.js';
 import { type HistoryMessage, loadHistory, saveHistory } from './history.js';
 
 /**
@@ -74,7 +76,12 @@ export interface PermissionOption {
  */
 export interface Problem {
   readonly kind:
-    | 'not-installed'
+    | 'script-missing'
+    | 'not-downloaded'
+    | 'downloading'
+    | 'download-failed'
+    | 'no-claude'
+    | 'old-tyto'
     | 'not-logged-in'
     | 'restricted'
     | 'no-programs'
@@ -91,6 +98,8 @@ export interface Problem {
    * terminal (`login`). Without one the panel cannot sign the person in, and says so.
    */
   readonly canLogIn?: boolean;
+  /** For `not-downloaded`: the page offers **Download** (`download`). */
+  readonly canDownload?: boolean;
 }
 
 /** One of the agent's terminal sign-ins: run the agent again with `args`, in a terminal. */
@@ -170,11 +179,14 @@ function messageOf(cause: unknown): string {
 export function startProblem(choice: AgentChoice, cause: unknown): Problem {
   const { driver } = choice;
   switch (codeOf(cause)) {
+    // The program is the plugin's own launcher (ADR 0184), so a missing one is a broken install,
+    // never a program the person forgot to put on PATH.
+    case 'E_PROCESS_SCRIPT_MISSING':
     case 'E_PROCESS_NOT_FOUND':
       return {
-        kind: 'not-installed',
-        message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
-        steps: [...driver.install],
+        kind: 'script-missing',
+        message: `The agent plugin's own program, ${driver.program}, is missing from its folder. Reinstall the plugin.`,
+        steps: [],
         params: { label: driver.label, program: driver.program },
       };
     case 'E_PROCESS_RESTRICTED':
@@ -217,6 +229,64 @@ export function loginProblem(choice: AgentChoice, method: LoginMethod | undefine
         params: { label },
         canLogIn: true,
       };
+}
+
+/** What the launcher's status (TYTO-666) says stands in the way, or `undefined` when nothing does. */
+export function adapterProblem(choice: AgentChoice, status: StatusLine): Problem | undefined {
+  const label = choice.driver.label;
+  if (!status.data) {
+    return {
+      kind: 'old-tyto',
+      message: `The agent panel needs Tyto 0.18 or later, which gives a plugin's program a folder to download ${label}'s adapter into. Update Tyto.`,
+      steps: [],
+      params: { label },
+    };
+  }
+  if (status.claude !== 'found') {
+    return {
+      kind: 'no-claude',
+      message:
+        status.claude === 'shim'
+          ? `${label} Code was found only as an npm shim (claude.cmd), which the adapter cannot start. Install ${label} Code natively, so that claude.exe is on your PATH, then press New.`
+          : `${label} Code is not installed: the panel talks to your own \`claude\`, and it is not on your PATH. Install ${label} Code, then press New.`,
+      steps: [],
+      params: { label, found: status.claude },
+    };
+  }
+  if (!status.installed) {
+    const size = megabytes(status.bytes);
+    return {
+      kind: 'not-downloaded',
+      message: `${label}'s adapter is not downloaded yet. **Download** fetches @agentclientprotocol/claude-agent-acp ${status.version} from ${status.source}, about ${size} MB on disk, into Tyto's folder for this plugin, and checks every file against the hash this plugin pins. It includes Anthropic's Claude Agent SDK, under Anthropic's own terms.`,
+      steps: [],
+      params: { label, version: status.version, size, source: status.source },
+      canDownload: true,
+    };
+  }
+  return undefined;
+}
+
+export function downloadingProblem(choice: AgentChoice, done: number, total: number): Problem {
+  const label = choice.driver.label;
+  return {
+    kind: 'downloading',
+    message: `Downloading ${label}'s adapter: ${String(done)} of ${String(total)} packages.`,
+    steps: [],
+    params: { label, done: String(done), total: String(total) },
+  };
+}
+
+export function downloadFailedProblem(
+  choice: AgentChoice,
+  outcome: Extract<InstallOutcome, { installed: false }>,
+): Problem {
+  const label = choice.driver.label;
+  return {
+    kind: 'download-failed',
+    message: `${label}'s adapter did not download, and nothing was installed (${outcome.code}): ${outcome.message}. Press New to try again.`,
+    steps: [],
+    params: { label, code: outcome.code, reason: outcome.message },
+  };
 }
 
 /** The name Tyto gives the window's MCP server (Tyto ADR 0183, `WINDOW_AGENT_SERVER_NAME`). */
@@ -316,6 +386,11 @@ export interface Conversation {
   /** Ends the agent and forgets the conversation; the next message starts a fresh one. */
   reset(): Promise<void>;
   /**
+   * Starts the download the person accepted (TYTO-666): answered at once, its progress read as
+   * the status's `downloading` problem. Refused while one runs.
+   */
+  download(): { readonly started: boolean; readonly code?: 'running' };
+  /**
    * Opens a Tyto terminal running the agent's own sign-in (Tyto ADR 0184): the agent's program
    * with the arguments its `initialize` offered. The plugin never sees what runs there.
    */
@@ -336,6 +411,8 @@ export function conversation(
   let folder: string | null = null;
   /** The agent's terminal sign-in, from its last `initialize`. */
   let loginMethod: LoginMethod | undefined;
+  /** The adapter's download, while it runs (TYTO-666). */
+  let downloading: Promise<void> | undefined;
   let messages: HistoryMessage[] = [];
   let reply = '';
   const permissions = new Map<string, (optionId: string | null) => void>();
@@ -458,8 +535,65 @@ export function conversation(
     }
   }
 
+  function download(): { readonly started: boolean; readonly code?: 'running' } {
+    if (downloading !== undefined) return { started: false, code: 'running' };
+    const choice = chosenAgent(host);
+    problem = downloadingProblem(choice, 0, 0);
+    downloading = installAdapter(host, choice.driver.program, (done, total) => {
+      problem = downloadingProblem(choice, done, total);
+    })
+      .catch((cause: unknown): InstallOutcome => ({
+        installed: false,
+        code: 'unknown',
+        message: startProblem(choice, cause).message,
+      }))
+      .then((outcome) => {
+        problem = outcome.installed ? null : downloadFailedProblem(choice, outcome);
+      })
+      .finally(() => {
+        downloading = undefined;
+      });
+    return { started: true };
+  }
+
+  /**
+   * Whether the adapter is there to start (TYTO-666): the launcher's status, read before every
+   * start, so a download, a new pin or a `claude` installed meanwhile is seen at the next one. An
+   * earlier pin the person already accepted is replaced without asking again, as Zed keeps its
+   * copy up to date.
+   */
+  async function prepared(choice: AgentChoice): Promise<boolean> {
+    if (downloading !== undefined) return false;
+    let found: StatusLine | undefined;
+    try {
+      found = await adapterStatus(host, choice.driver.program);
+    } catch (cause) {
+      problem = startProblem(choice, cause);
+      return false;
+    }
+    if (found === undefined) {
+      problem = {
+        kind: 'failed',
+        message: "The agent plugin's launcher said nothing about the adapter.",
+        steps: [],
+      };
+      return false;
+    }
+    if (!found.installed && found.data && found.claude === 'found' && found.previous !== null) {
+      download();
+      return false;
+    }
+    const standing = adapterProblem(choice, found);
+    if (standing !== undefined) {
+      problem = standing;
+      return false;
+    }
+    return true;
+  }
+
   async function start(): Promise<Running | undefined> {
     const choice = chosenAgent(host);
+    if (choice.driver.downloads && !(await prepared(choice))) return undefined;
     let program: PluginProcess;
     try {
       program = await host.process.start(choice.driver.program, choice.args);
@@ -660,6 +794,7 @@ export function conversation(
       window = 'unknown';
       if (ending !== undefined) await ending.program.kill();
     },
+    download,
     async login() {
       const method = loginMethod;
       if (method === undefined) return { opened: false, code: 'no-method' };

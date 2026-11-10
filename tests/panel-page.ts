@@ -32,6 +32,11 @@ export interface PageScript {
   readonly login?: Record<string, unknown>;
   /** The status `open` answers once `login` was called: the person signed in meanwhile. */
   readonly afterLogin?: Record<string, unknown>;
+  /**
+   * The statuses successive `read`s answer once `download` was called (TYTO-666), the last one
+   * kept; `open` then answers the last one too.
+   */
+  readonly afterDownload?: readonly Record<string, unknown>[];
 }
 
 function host(script: PageScript): string {
@@ -48,13 +53,21 @@ const history = ${JSON.stringify(script.history ?? [])};
 let entries = ${JSON.stringify(script.entries ?? [])};
 const login = ${JSON.stringify(script.login ?? { opened: true })};
 const afterLogin = ${JSON.stringify(script.afterLogin ?? null)};
+const afterDownload = ${JSON.stringify(script.afterDownload ?? [])};
 const answers = {
   open: () => {
     if (calls.some((c) => c[0] === 'login')) { calls.push(['open']); if (afterLogin) status = afterLogin; }
+    if (calls.some((c) => c[0] === 'download')) calls.push(['open']);
     return { ...status, history };
   },
   login: () => { calls.push(['login']); return login; },
-  read: () => { const sent = entries; entries = []; return { entries: sent, status }; },
+  download: () => { calls.push(['download']); return { started: true }; },
+  read: () => {
+    if (calls.some((c) => c[0] === 'download') && afterDownload.length > 0) {
+      status = afterDownload.length > 1 ? afterDownload.shift() : afterDownload[0];
+    }
+    const sent = entries; entries = []; return { entries: sent, status };
+  },
   send: (params) => { calls.push(['send', params.text]); status = { ...status, busy: true }; return { accepted: true }; },
   cancel: () => { calls.push(['cancel']); return status; },
 };

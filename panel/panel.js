@@ -387,9 +387,44 @@ function showProblem(problem, again = false) {
     choices.append(login, retry);
     box.appendChild(choices);
   }
-  if (again && problemBox !== null && problemBox.isConnected) problemBox.replaceWith(box);
+  if (problem.kind === 'not-downloaded' && problem.canDownload === true) {
+    const choices = element('div', 'choices');
+    const download = element('button', 'primary', say().download);
+    download.addEventListener('click', () => void startDownload(download));
+    choices.append(download);
+    box.appendChild(choices);
+  }
+  box.dataset.kind = problem.kind;
+  // A download's progress replaces its own line rather than adding one per package.
+  const inPlace =
+    again || (problem.kind === 'downloading' && problemBox?.dataset.kind === 'downloading');
+  if (inPlace && problemBox !== null && problemBox.isConnected) problemBox.replaceWith(box);
   else append(box);
   problemBox = box;
+}
+
+/** Starts the download the person accepted (TYTO-666); `poll` follows its progress. */
+async function startDownload(button) {
+  button.disabled = true;
+  try {
+    const answer = await call('download');
+    if (answer.started || answer.code === 'running') void poll();
+  } catch (cause) {
+    button.disabled = false;
+    append(element('div', 'notice', say().unreachable(cause.message)));
+  }
+}
+
+/** Whether the last status was a download: when it ends, the panel starts the agent by itself. */
+let wasDownloading = false;
+
+function followDownload(status) {
+  const downloading = status.problem?.kind === 'downloading';
+  if (wasDownloading && !downloading && status.problem === null) {
+    append(element('div', 'notice', say().downloaded(status.agent)));
+    void tryAgain();
+  }
+  wasDownloading = downloading;
 }
 
 function permissionBox(entry) {
@@ -496,10 +531,11 @@ async function poll() {
     }
     showStatus(answer.status);
     showProblem(answer.status.problem);
+    followDownload(answer.status);
   } catch (cause) {
     append(element('div', 'notice', say().unreachable(cause.message)));
   }
-  timer = setTimeout(poll, busy ? FAST_MS : IDLE_MS);
+  timer = setTimeout(poll, busy || wasDownloading ? FAST_MS : IDLE_MS);
 }
 
 async function send() {
@@ -557,6 +593,7 @@ async function openPanel() {
     if (status.history.length > 0) append(element('div', 'meta', say().earlier));
     showStatus(status);
     showProblem(status.problem);
+    followDownload(status);
   } catch (cause) {
     append(element('div', 'notice', say().unreachable(cause.message)));
   }
