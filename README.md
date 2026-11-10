@@ -88,12 +88,26 @@ server without a message, in the terminal too. Ask your organisation's admin to 
 server `tyto`. Tyto does not work around that policy. If `tyto` is listed but did not connect,
 the panel names its status, and Claude Code's MCP log for `tyto` says why.
 
-Type a message and press **Send** (or Ctrl+Enter). The agent's replies render their markdown
+Type a message and press **Enter** to send it; Shift+Enter adds a line, and Ctrl+Enter also
+sends. The agent's replies render their markdown
 (bold, lists, code and diff blocks); a link shows its address and is not followed. Tool calls
 show as small lines with the tool's name (Tyto's own as `Tyto · <what it does>`), and the
 agent's plan the same way; a permission the agent asks for shows its options as buttons.
-**Stop** cancels the running turn, and **New** ends the agent and starts a fresh conversation.
+While a turn runs, a line above the input says what the agent is doing ("thinking…", "using
+Tyto · check the brief…", "waiting for your answer…"), and **Stop** takes Send's place: it
+cancels the running turn. The input stays editable for your next message, which Enter sends
+once the turn ends; nothing is queued. **New** ends the agent and starts a fresh conversation.
 The messages of earlier conversations in the same folder show above the first one, greyed.
+
+A chip above the input says what is in front in Tyto: the brief's name, its template and the
+format the preview shows (`mca-67256 · news-da-semana · grid`), or "no brief in front". When the
+agent has no Tyto tools, or agents are off in Tyto, the chip says that too. The name and the
+format come from Tyto 0.18 and later; an older Tyto sends only the text, and the chip names the
+template it reads there.
+
+The panel speaks English and Brazilian Portuguese and follows Tyto's language, as the rest of the
+window does, from Tyto 0.18. With an older Tyto it takes the browser's language, which is the
+operating system's, not Tyto's setting.
 
 ### Settings
 

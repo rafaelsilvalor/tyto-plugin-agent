@@ -28,6 +28,8 @@ export type Entry =
       readonly id: string;
       readonly title: string;
       readonly status: string;
+      /** Tyto's own tool's name (`check_brief`…), which the page names in its language. */
+      readonly tyto?: string;
     }
   | {
       readonly seq: number;
@@ -41,9 +43,24 @@ export type Entry =
       readonly title: string;
       readonly options: readonly PermissionOption[];
     }
-  | { readonly seq: number; readonly kind: 'answered'; readonly id: string; readonly name: string }
-  | { readonly seq: number; readonly kind: 'notice'; readonly text: string }
+  | {
+      readonly seq: number;
+      readonly kind: 'answered';
+      readonly id: string;
+      readonly name: string;
+      readonly cancelled: boolean;
+    }
+  | {
+      readonly seq: number;
+      readonly kind: 'notice';
+      readonly text: string;
+      /** What the notice says, for the page to say it in its language; `text` is English. */
+      readonly code?: NoticeCode;
+      readonly params?: Readonly<Record<string, string>>;
+    }
   | { readonly seq: number; readonly kind: 'end'; readonly reason: string };
+
+export type NoticeCode = 'agents-off' | 'ended' | 'not-started' | 'turn-failed';
 
 export interface PermissionOption {
   readonly optionId: string;
@@ -64,8 +81,11 @@ export interface Problem {
     | 'exited'
     | 'failed'
     | 'no-tools';
+  /** In English; the page says it in its language from `kind` and `params` when it knows it. */
   readonly message: string;
   readonly steps: readonly string[];
+  /** The names `message` is built from: `label`, `program`, `login`, `status`. */
+  readonly params?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -110,6 +130,7 @@ export function startProblem(choice: AgentChoice, cause: unknown): Problem {
         kind: 'not-installed',
         message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
         steps: [...driver.install, `then sign in once: ${driver.login.join(' ')}`],
+        params: { label: driver.label, program: driver.program, login: driver.login.join(' ') },
       };
     case 'E_PROCESS_RESTRICTED':
       return {
@@ -135,6 +156,7 @@ export function loginProblem(choice: AgentChoice): Problem {
     kind: 'not-logged-in',
     message: `${choice.driver.label} is not signed in. It uses its own login: Tyto never sees or stores it.`,
     steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(' ')}`],
+    params: { label: choice.driver.label, login: choice.driver.login.join(' ') },
   };
 }
 
@@ -156,6 +178,7 @@ export function toolsProblem(
       kind: 'no-tools',
       message: `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`,
       steps: [],
+      params: { label },
     };
   }
   if (server.status === 'connected' || server.status === 'pending') return undefined;
@@ -163,6 +186,7 @@ export function toolsProblem(
     kind: 'no-tools',
     message: `${label} has Tyto's tools configured, but they did not connect (status: ${server.status || 'unknown'}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
     steps: [],
+    params: { label, status: server.status || 'unknown' },
   };
 }
 
@@ -197,6 +221,12 @@ export function toolTitle(name: string, title: string): string {
   return title !== '' ? title : name;
 }
 
+/** Tyto's own tool's name, when `name` is one of the window server's tools. */
+export function tytoTool(name: string): string | undefined {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(name);
+  return match !== null && match[1] === WINDOW_SERVER ? match[2] : undefined;
+}
+
 /** The tool's own name in an update: ACP's `name` field, or the adapter's `_meta`. */
 function toolNameOf(update: Record<string, unknown>): string {
   if (typeof update['name'] === 'string') return update['name'];
@@ -216,7 +246,11 @@ export interface Conversation {
   /** Starts the agent if it is not running, and says how things stand. */
   open(): Promise<Status & { readonly history: readonly HistoryMessage[] }>;
   /** Starts a turn with the person's text; refused while one runs. */
-  send(text: string): { readonly accepted: boolean; readonly reason?: string };
+  send(text: string): {
+    readonly accepted: boolean;
+    readonly reason?: string;
+    readonly code?: 'busy' | 'empty';
+  };
   read(after: number): { readonly entries: readonly Entry[]; readonly status: Status };
   answer(permission: string, optionId: string | null): { readonly answered: boolean };
   cancel(): Promise<void>;
@@ -241,6 +275,8 @@ export function conversation(
   const permissions = new Map<string, (optionId: string | null) => void>();
   /** Each tool call's line name, from its first report: updates rarely repeat it. */
   const toolTitles = new Map<string, string>();
+  /** Each Tyto tool call's own name, from its first report. */
+  const tytoTools = new Map<string, string>();
 
   // Typed per kind: `Omit` over the union would lose which fields go with which kind.
   const push = (entry: Record<string, unknown> & { kind: Entry['kind'] }): void => {
@@ -270,16 +306,17 @@ export function conversation(
       push({ kind: 'thought', text });
     } else if (kind === 'tool_call' || kind === 'tool_call_update') {
       const id = String(update['toolCallId'] ?? '');
-      const named = toolTitle(
-        toolNameOf(update),
-        typeof update['title'] === 'string' ? update['title'] : '',
-      );
+      const name = toolNameOf(update);
+      const named = toolTitle(name, typeof update['title'] === 'string' ? update['title'] : '');
       if (named !== '') toolTitles.set(id, named);
+      const tyto = tytoTool(name);
+      if (tyto !== undefined) tytoTools.set(id, tyto);
       push({
         kind: 'tool',
         id,
         title: toolTitles.get(id) ?? '',
         status: typeof update['status'] === 'string' ? update['status'] : '',
+        ...(tytoTools.has(id) ? { tyto: tytoTools.get(id) } : {}),
       });
     } else if (kind === 'plan' && Array.isArray(update['entries'])) {
       push({
@@ -315,7 +352,12 @@ export function conversation(
       permissions.set(id, (optionId) => {
         permissions.delete(id);
         const chosen = options.find((option) => option.optionId === optionId);
-        push({ kind: 'answered', id, name: chosen?.name ?? 'cancelled' });
+        push({
+          kind: 'answered',
+          id,
+          name: chosen?.name ?? 'cancelled',
+          cancelled: chosen === undefined,
+        });
         resolve({
           outcome:
             chosen === undefined
@@ -342,6 +384,7 @@ export function conversation(
       if (code === 'E_WINDOW_AGENTS_OFF') {
         push({
           kind: 'notice',
+          code: 'agents-off',
           text: 'Tyto does not let agents connect (setting agentsListen), so the agent cannot see the brief in front or propose edits. Turn it on and start a new conversation.',
         });
       }
@@ -390,9 +433,12 @@ export function conversation(
       if (running?.program === program) {
         running = undefined;
         busy = false;
+        const code = String(exit.code ?? exit.signal);
         push({
           kind: 'notice',
-          text: `The agent ended (exit ${String(exit.code ?? exit.signal)}). Your next message starts it again.`,
+          code: 'ended',
+          params: { exit: code },
+          text: `The agent ended (exit ${code}). Your next message starts it again.`,
         });
         if (stderr.trim() !== '') host.log.info(`agent stderr: ${stderr.trim()}`);
       }
@@ -440,7 +486,8 @@ export function conversation(
       // A problem is shown once, by the page, from the status with its steps; the log
       // repeats it only when there is none to show.
       if (agent === undefined) {
-        if (problem === null) push({ kind: 'notice', text: 'The agent did not start.' });
+        if (problem === null)
+          push({ kind: 'notice', code: 'not-started', text: 'The agent did not start.' });
         return;
       }
       const answer = (await agent.connection.request('session/prompt', {
@@ -452,7 +499,13 @@ export function conversation(
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
         problem = loginProblem(chosenAgent(host));
       } else {
-        push({ kind: 'notice', text: `The turn failed: ${messageOf(cause)}` });
+        const said = messageOf(cause);
+        push({
+          kind: 'notice',
+          code: 'turn-failed',
+          params: { message: said },
+          text: `The turn failed: ${said}`,
+        });
       }
     } finally {
       busy = false;
@@ -471,8 +524,16 @@ export function conversation(
       return { ...status(), history: messages };
     },
     send(text) {
-      if (busy) return { accepted: false, reason: 'A turn is running; wait for it or stop it.' };
-      if (text.trim() === '') return { accepted: false, reason: 'The message is empty.' };
+      if (busy) {
+        return {
+          accepted: false,
+          code: 'busy',
+          reason: 'A turn is running; wait for it or stop it.',
+        };
+      }
+      if (text.trim() === '') {
+        return { accepted: false, code: 'empty', reason: 'The message is empty.' };
+      }
       busy = true;
       push({ kind: 'user', text });
       void turn(text);
@@ -501,6 +562,7 @@ export function conversation(
       busy = false;
       entries.length = 0;
       toolTitles.clear();
+      tytoTools.clear();
       messages = [];
       problem = null;
       window = 'unknown';
