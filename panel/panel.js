@@ -4,6 +4,13 @@
 // seconds otherwise, to hear that the agent ended.
 //
 // Everything the agent says is set as text, never as HTML.
+//
+// Tyto also tells the page, unasked, what the document in front is (`document`: its text, and
+// since Tyto 0.18 its name and the format the preview shows) and the window's language
+// (`language`, since 0.18). The page draws the context chip from the first and speaks the second;
+// on an older Tyto it reads the template from the brief's text and the language from the browser.
+
+/* global WORDS */
 
 const FAST_MS = 250;
 const IDLE_MS = 3000;
@@ -14,6 +21,10 @@ let nextId = 1;
 window.addEventListener('message', (event) => {
   const message = event.data;
   if (message === null || typeof message !== 'object' || message.tyto !== 'panel') return;
+  if (message.type === 'event') {
+    heard(message);
+    return;
+  }
   if (message.type !== 'response') return;
   const waiting = pending.get(message.id);
   if (waiting === undefined) return;
@@ -39,10 +50,26 @@ const input = document.getElementById('input');
 const sendButton = document.getElementById('send');
 const stopButton = document.getElementById('stop');
 const agentName = document.getElementById('agent');
-const windowBadge = document.getElementById('window');
+const resetButton = document.getElementById('reset');
+const context = document.getElementById('context');
+const working = document.getElementById('working');
 
 let after = 0;
 let busy = false;
+/** The last status the plugin answered; the chip and the working line read it. */
+let lastStatus = null;
+/** The tools the agent is using now, by call id, while they run; named when shown. */
+const running = new Map();
+/** Permissions the agent asked for and the person has not answered. */
+const waiting = new Set();
+let stopping = false;
+
+/** `en` or `pt-BR`: Tyto's, once it says; until then the browser's, which is the system's. */
+let language = /^pt\b/iu.test(navigator.language) ? 'pt-BR' : 'en';
+const say = () => WORDS[language];
+
+/** The document in front, as Tyto last told it; `null` before it says anything. */
+let front = null;
 let currentReply = null;
 let timer = null;
 const tools = new Map();
@@ -172,38 +199,143 @@ function append(node) {
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
-const WINDOW_TEXT = {
-  connected: 'sees the window',
-  missing: 'no Tyto tools',
-  off: 'window off (agentsListen)',
-  unavailable: 'no window',
-  unknown: 'window: …',
-};
+/** The template a brief names in its front matter, or null. */
+function templateOf(text) {
+  const head = /^\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/u.exec(text);
+  if (head === null) return null;
+  const named = /^template:[ \t]*["']?([^"'\s#]+)/mu.exec(head[1]);
+  return named === null ? null : named[1];
+}
+
+/** The context chip: the brief in front, its template and format, and what the agent lacks. */
+function showContext() {
+  const words = say();
+  const template = front === null ? null : templateOf(front.text);
+  const name = front?.name ? front.name.replace(/\.brief$/u, '') : null;
+  const parts = template === null ? [] : [name, template, front?.format ?? null];
+  const brief = element(
+    'span',
+    template === null ? 'context-brief empty' : 'context-brief',
+    template === null ? words.noBrief : parts.filter((part) => part).join(' · '),
+  );
+  const nodes = [brief];
+  const reach = words.reach[lastStatus?.window];
+  if (reach !== undefined) nodes.push(element('span', 'context-reach', reach));
+  const title = `${words.contextTitle}: ${nodes.map((node) => node.textContent).join(' — ')}`;
+  // Every read redraws the status, four times a second in a turn: the chip is replaced only
+  // when what it says changed, so it is not a new element under the pointer each time.
+  const said = `${brief.className}|${title}`;
+  if (context.dataset.said === said) return;
+  context.dataset.said = said;
+  context.replaceChildren(...nodes);
+  context.title = title;
+}
+
+/** A tool's name as a line says it: Tyto's own in the page's language. */
+function toolName(entry) {
+  if (entry.tyto === undefined) return entry.title || 'tool';
+  return `Tyto · ${say().tools[entry.tyto] ?? entry.tyto.replaceAll('_', ' ')}`;
+}
+
+/** What the agent is doing, above the input, while a turn runs. */
+function showWorking() {
+  const words = say();
+  working.hidden = !busy;
+  if (!busy) return;
+  const tools = [...running.values()];
+  working.querySelector('.working-text').textContent = stopping
+    ? words.stopping
+    : waiting.size > 0
+      ? words.waiting
+      : tools.length > 0
+        ? words.using(toolName(tools[tools.length - 1]))
+        : words.thinking;
+}
+
+/** The words the page writes itself, again in the page's language. */
+function showWords() {
+  const words = say();
+  document.documentElement.lang = language;
+  if (lastStatus === null) agentName.textContent = words.agent;
+  resetButton.textContent = words.newConversation;
+  resetButton.title = words.newTitle;
+  input.placeholder = words.placeholder;
+  sendButton.textContent = words.send;
+  stopButton.textContent = words.stop;
+  stopButton.title = words.stopTitle;
+  showContext();
+  showWorking();
+  if (shownProblem !== null) showProblem(lastStatus?.problem ?? null, true);
+}
 
 function showStatus(status) {
+  lastStatus = status;
   agentName.textContent = status.agent;
-  windowBadge.textContent = WINDOW_TEXT[status.window] ?? status.window;
   busy = status.busy;
-  sendButton.disabled = busy;
+  if (!busy) {
+    stopping = false;
+    running.clear();
+    waiting.clear();
+  }
+  // Stop takes Send's place while a turn runs: one button, always under the person's hand.
+  sendButton.hidden = busy;
   stopButton.hidden = !busy;
+  showContext();
+  showWorking();
+}
+
+/** What Tyto says unasked: the document in front, and its language. */
+function heard(message) {
+  if (message.event === 'document' && typeof message.text === 'string') {
+    front = {
+      text: message.text,
+      name: typeof message.name === 'string' ? message.name : null,
+      format: typeof message.format === 'string' ? message.format : null,
+    };
+    showContext();
+  } else if (message.event === 'language' && Object.hasOwn(WORDS, message.language)) {
+    language = message.language;
+    showWords();
+  }
 }
 
 let shownProblem = null;
-function showProblem(problem) {
+let problemBox = null;
+
+/** A problem in the page's language, from its kind and names; the process's English otherwise. */
+function problemWords(problem) {
+  const words = say();
+  const params = problem.params;
+  const known = params === undefined ? undefined : words.problems[problem.kind];
+  const message = known === undefined ? problem.message : known(params);
+  let steps = problem.steps;
+  if (params?.login !== undefined && problem.kind === 'not-installed') {
+    steps = [...steps.slice(0, -1), words.signInOnce(params.login)];
+  } else if (params?.login !== undefined && problem.kind === 'not-logged-in') {
+    steps = [words.openTerminal(params.login)];
+  }
+  return { message, steps };
+}
+
+/** Shows the status's problem once; `again` redraws the one shown, in another language. */
+function showProblem(problem, again = false) {
   const key = problem === null ? null : `${problem.kind}:${problem.message}`;
-  if (key === shownProblem) return;
+  if (key === shownProblem && !again) return;
   shownProblem = key;
   if (problem === null) return;
+  const { message, steps } = problemWords(problem);
   const box = element('div', 'problem');
-  showMarkdown(box.appendChild(element('div', 'said')), problem.message);
-  for (const step of problem.steps) box.appendChild(element('code', '', step));
-  append(box);
+  showMarkdown(box.appendChild(element('div', 'said')), message);
+  for (const step of steps) box.appendChild(element('code', '', step));
+  if (again && problemBox !== null && problemBox.isConnected) problemBox.replaceWith(box);
+  else append(box);
+  problemBox = box;
 }
 
 function permissionBox(entry) {
   const box = element('div', 'permission');
   box.id = `permission-${entry.id}`;
-  box.appendChild(element('div', '', `The agent asks to use ${entry.title}.`));
+  box.appendChild(element('div', '', say().asks(entry.title)));
   const choices = element('div', 'choices');
   for (const option of entry.options) {
     const button = element('button', option.kind.startsWith('allow') ? 'primary' : '', option.name);
@@ -238,7 +370,10 @@ function show(entry) {
       append(element('div', 'thought', entry.text));
       break;
     case 'tool': {
-      const text = `${entry.title || 'tool'} — ${entry.status || 'pending'}`;
+      const status = entry.status || 'pending';
+      const text = `${toolName(entry)} — ${say().toolStatus[status] ?? status}`;
+      if (status === 'pending' || status === 'in_progress') running.set(entry.id, entry);
+      else running.delete(entry.id);
       const known = tools.get(entry.id);
       if (known !== undefined) known.textContent = text;
       else {
@@ -260,23 +395,33 @@ function show(entry) {
       break;
     case 'permission':
       currentReply = null;
+      waiting.add(entry.id);
       append(permissionBox(entry));
       break;
     case 'answered': {
+      waiting.delete(entry.id);
       const box = document.getElementById(`permission-${entry.id}`);
       if (box !== null) {
         for (const button of box.querySelectorAll('button')) button.disabled = true;
-        box.appendChild(element('div', 'meta', `Answered: ${entry.name}`));
+        box.appendChild(
+          element('div', 'meta', say().answered(entry.cancelled ? say().cancelled : entry.name)),
+        );
       }
       break;
     }
-    case 'notice':
+    case 'notice': {
       currentReply = null;
-      append(element('div', 'notice', entry.text));
+      const known = entry.code === undefined ? undefined : say().notices[entry.code];
+      append(
+        element('div', 'notice', known === undefined ? entry.text : known(entry.params ?? {})),
+      );
       break;
+    }
     case 'end':
       currentReply = null;
-      if (entry.reason !== 'end_turn') append(element('div', 'meta', `Stopped: ${entry.reason}`));
+      if (entry.reason !== 'end_turn') {
+        append(element('div', 'meta', say().stopped(say().reasons[entry.reason] ?? entry.reason)));
+      }
       break;
   }
 }
@@ -292,7 +437,7 @@ async function poll() {
     showStatus(answer.status);
     showProblem(answer.status.problem);
   } catch (cause) {
-    append(element('div', 'notice', `The panel could not reach the plugin: ${cause.message}`));
+    append(element('div', 'notice', say().unreachable(cause.message)));
   }
   timer = setTimeout(poll, busy ? FAST_MS : IDLE_MS);
 }
@@ -302,28 +447,41 @@ async function send() {
   if (text.trim() === '' || busy) return;
   const answer = await call('send', { text });
   if (!answer.accepted) {
-    append(element('div', 'notice', answer.reason));
+    append(element('div', 'notice', say().refusals[answer.code] ?? answer.reason));
     return;
   }
   input.value = '';
   busy = true;
+  sendButton.hidden = true;
+  stopButton.hidden = false;
+  showWorking();
   void poll();
 }
 
 sendButton.addEventListener('click', () => void send());
+// Enter sends and Shift+Enter adds a line, as in a chat; Ctrl+Enter (Cmd+Enter) still sends.
+// An Enter that ends an input method's composition only picks the word, so it sends nothing.
+// While a turn runs the box stays editable for the next message, and Enter sends nothing.
 input.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-    event.preventDefault();
-    void send();
-  }
+  if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+  if (event.shiftKey && !event.ctrlKey && !event.metaKey) return;
+  event.preventDefault();
+  void send();
 });
-stopButton.addEventListener('click', () => void call('cancel').then(() => poll()));
-document.getElementById('reset').addEventListener('click', async () => {
+stopButton.addEventListener('click', () => {
+  stopping = true;
+  showWorking();
+  void call('cancel').then(() => poll());
+});
+resetButton.addEventListener('click', async () => {
   await call('reset');
   log.replaceChildren();
   tools.clear();
+  running.clear();
+  waiting.clear();
   currentReply = null;
   shownProblem = null;
+  problemBox = null;
   void openPanel();
 });
 
@@ -336,13 +494,14 @@ async function openPanel() {
       else node.textContent = message.text;
       append(node);
     }
-    if (status.history.length > 0) append(element('div', 'meta', 'Earlier in this folder ↑'));
+    if (status.history.length > 0) append(element('div', 'meta', say().earlier));
     showStatus(status);
     showProblem(status.problem);
   } catch (cause) {
-    append(element('div', 'notice', `The panel could not reach the plugin: ${cause.message}`));
+    append(element('div', 'notice', say().unreachable(cause.message)));
   }
   void poll();
 }
 
+showWords();
 void openPanel();

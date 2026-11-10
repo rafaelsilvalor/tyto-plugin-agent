@@ -33,7 +33,12 @@ interface Status {
   readonly busy: boolean;
   readonly window: string;
   readonly folder: string | null;
-  readonly problem: { kind: string; message: string; steps: string[] } | null;
+  readonly problem: {
+    kind: string;
+    message: string;
+    steps: string[];
+    params?: Record<string, string>;
+  } | null;
 }
 
 const closing: (() => Promise<void>)[] = [];
@@ -133,7 +138,8 @@ describe('a conversation with the agent', () => {
     });
     await call('open');
     expect(await call('send', { text: 'one' })).toEqual({ accepted: true });
-    expect(await call('send', { text: 'two' })).toMatchObject({ accepted: false });
+    expect(await call('send', { text: 'two' })).toMatchObject({ accepted: false, code: 'busy' });
+    expect(await call('send', { text: '  ' })).toMatchObject({ accepted: false, code: 'busy' });
     finish();
     await readUntil(ended);
     expect(await call('send', { text: 'three' })).toEqual({ accepted: true });
@@ -202,6 +208,7 @@ describe('a permission the agent asks for', () => {
     const entries = await readUntil(ended);
     expect(outcome).toEqual({ outcome: 'cancelled' });
     expect(agent.heard.map((item) => item.method)).toContain('session/cancel');
+    expect(entries.find((item) => item.kind === 'answered')).toMatchObject({ cancelled: true });
     expect(entries.at(-1)).toMatchObject({ kind: 'end', reason: 'cancelled' });
   });
 });
@@ -219,6 +226,7 @@ describe('the states the card names', () => {
         'npm install -g @agentclientprotocol/claude-agent-acp',
         'then sign in once: claude /login',
       ],
+      params: { label: 'Claude', program: 'claude-agent-acp', login: 'claude /login' },
     });
   });
 
@@ -227,6 +235,7 @@ describe('the states the card names', () => {
     const status = await call<Status>('open');
     expect(status.problem?.kind).toBe('not-logged-in');
     expect(status.problem?.steps).toEqual(['open a terminal in Tyto and run: claude /login']);
+    expect(status.problem?.params).toEqual({ label: 'Claude', login: 'claude /login' });
     expect(agent.killed()).toBe(1);
   });
 
@@ -269,6 +278,7 @@ describe('the states the card names', () => {
     });
     const notice = await readUntil((entries) => entries.some((item) => item.kind === 'notice'));
     expect(String(notice[0]?.['text'])).toContain('setting agentsListen');
+    expect(notice[0]?.['code']).toBe('agents-off');
   });
 
   it('says the agent ended, and starts it again on the next message', async () => {
@@ -288,7 +298,10 @@ describe('the states the card names', () => {
     const first = await readUntil((entries) =>
       entries.some((item) => item.kind === 'notice' && String(item['text']).includes('ended')),
     );
-    expect(first.some((item) => item.kind === 'notice')).toBe(true);
+    expect(first.find((item) => item.kind === 'notice')).toMatchObject({
+      code: 'ended',
+      params: { exit: '1' },
+    });
     await readUntil(() => true);
     expect((await call<{ status: Status }>('read', { after: 1e9 })).status.busy).toBe(false);
     await call('send', { text: 'second' });
@@ -406,13 +419,15 @@ describe('tool lines', () => {
     await call('send', { text: 'oi' });
     const { entries } = await afterTurn(call);
     expect(
-      entries.filter((item) => item.kind === 'tool').map((item) => [item['title'], item['status']]),
+      entries
+        .filter((item) => item.kind === 'tool')
+        .map((item) => [item['title'], item['status'], item['tyto']]),
     ).toEqual([
-      ['Tyto · describe a template', 'pending'],
-      ['Tyto · describe a template', 'completed'],
-      ['Read brief.brief', 'pending'],
-      ['Read brief.brief', 'completed'],
-      ['figma · get_screenshot', 'pending'],
+      ['Tyto · describe a template', 'pending', 'describe_template'],
+      ['Tyto · describe a template', 'completed', 'describe_template'],
+      ['Read brief.brief', 'pending', undefined],
+      ['Read brief.brief', 'completed', undefined],
+      ['figma · get_screenshot', 'pending', undefined],
     ]);
   });
 });

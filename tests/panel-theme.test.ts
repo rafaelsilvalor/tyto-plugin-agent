@@ -1,7 +1,7 @@
 import { type Browser, type Frame, type Page, chromium } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { openPanelPage } from './panel-page.js';
+import { openPanelPage, tell } from './panel-page.js';
 
 /**
  * The panel page's colours in both of Tyto's themes, measured on rendered pixels.
@@ -20,12 +20,13 @@ const PROBLEM = {
   kind: 'not-logged-in',
   message: 'Claude is not signed in. It uses its own login: Tyto never sees or stores it.',
   steps: ['open a terminal in Tyto and run: claude /login'],
+  params: { label: 'Claude', login: 'claude /login' },
 };
 const STATUS = {
   agent: 'Claude',
   running: true,
-  busy: false,
-  window: 'connected',
+  busy: true,
+  window: 'missing',
   folder: '/home/ana/work',
   problem: PROBLEM,
 };
@@ -34,13 +35,24 @@ const ENTRIES = [
   { seq: 2, kind: 'text', text: 'Hello, world' },
   { seq: 3, kind: 'tool', id: 't1', title: 'read_brief', status: 'completed' },
   { seq: 4, kind: 'notice', text: 'The agent ended.' },
+  {
+    seq: 5,
+    kind: 'tool',
+    id: 't2',
+    title: 'Tyto · check the brief',
+    status: 'in_progress',
+    tyto: 'check_brief',
+  },
 ];
 
 /** What each line is: its selector in the page, and what it says. */
 const LINES = [
   ['the agent name', 'header strong'],
-  ['the window badge', '#window'],
   ['the New button', '#reset'],
+  ['the context chip’s brief', '.context-brief'],
+  ['what the chip says the agent lacks', '.context-reach'],
+  ['the working line', '.working-text'],
+  ['the Stop button', '#stop'],
   ['the person’s message', '.message.user'],
   ['the agent’s reply', '.message.agent'],
   ['a tool line', '.tool'],
@@ -130,6 +142,13 @@ async function panelIn(scheme: 'light' | 'dark'): Promise<Frame> {
   const frame = await openPanelPage(browser, { scheme, status: STATUS, entries: ENTRIES });
   await frame.waitForSelector('.notice');
   await frame.waitForSelector('.problem');
+  await tell(frame, {
+    event: 'document',
+    text: ['---', 'template: news-da-semana', '---', '::titulo Oi'].join('\n'),
+    name: 'aviso.brief',
+    format: 'grid',
+  });
+  await frame.waitForSelector('.context-brief:not(.empty)');
   return frame;
 }
 

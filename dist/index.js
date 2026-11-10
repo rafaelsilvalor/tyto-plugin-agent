@@ -217,7 +217,8 @@ function startProblem(choice, cause) {
       return {
         kind: "not-installed",
         message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
-        steps: [...driver.install, `then sign in once: ${driver.login.join(" ")}`]
+        steps: [...driver.install, `then sign in once: ${driver.login.join(" ")}`],
+        params: { label: driver.label, program: driver.program, login: driver.login.join(" ") }
       };
     case "E_PROCESS_RESTRICTED":
       return {
@@ -239,7 +240,8 @@ function loginProblem(choice) {
   return {
     kind: "not-logged-in",
     message: `${choice.driver.label} is not signed in. It uses its own login: Tyto never sees or stores it.`,
-    steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(" ")}`]
+    steps: [`open a terminal in Tyto and run: ${choice.driver.login.join(" ")}`],
+    params: { label: choice.driver.label, login: choice.driver.login.join(" ") }
   };
 }
 var WINDOW_SERVER = "tyto";
@@ -250,14 +252,16 @@ function toolsProblem(choice, servers) {
     return {
       kind: "no-tools",
       message: `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`,
-      steps: []
+      steps: [],
+      params: { label }
     };
   }
   if (server.status === "connected" || server.status === "pending") return void 0;
   return {
     kind: "no-tools",
     message: `${label} has Tyto's tools configured, but they did not connect (status: ${server.status || "unknown"}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
-    steps: []
+    steps: [],
+    params: { label, status: server.status || "unknown" }
   };
 }
 var TYTO_TOOLS = {
@@ -281,6 +285,10 @@ function toolTitle(name, title) {
   }
   return title !== "" ? title : name;
 }
+function tytoTool(name) {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(name);
+  return match !== null && match[1] === WINDOW_SERVER ? match[2] : void 0;
+}
 function toolNameOf(update) {
   if (typeof update["name"] === "string") return update["name"];
   const meta = update["_meta"];
@@ -300,6 +308,7 @@ function conversation(host) {
   let reply = "";
   const permissions = /* @__PURE__ */ new Map();
   const toolTitles = /* @__PURE__ */ new Map();
+  const tytoTools = /* @__PURE__ */ new Map();
   const push = (entry) => {
     seq += 1;
     entries.push({ ...entry, seq });
@@ -325,16 +334,17 @@ function conversation(host) {
       push({ kind: "thought", text });
     } else if (kind === "tool_call" || kind === "tool_call_update") {
       const id = String(update2["toolCallId"] ?? "");
-      const named = toolTitle(
-        toolNameOf(update2),
-        typeof update2["title"] === "string" ? update2["title"] : ""
-      );
+      const name = toolNameOf(update2);
+      const named = toolTitle(name, typeof update2["title"] === "string" ? update2["title"] : "");
       if (named !== "") toolTitles.set(id, named);
+      const tyto = tytoTool(name);
+      if (tyto !== void 0) tytoTools.set(id, tyto);
       push({
         kind: "tool",
         id,
         title: toolTitles.get(id) ?? "",
-        status: typeof update2["status"] === "string" ? update2["status"] : ""
+        status: typeof update2["status"] === "string" ? update2["status"] : "",
+        ...tytoTools.has(id) ? { tyto: tytoTools.get(id) } : {}
       });
     } else if (kind === "plan" && Array.isArray(update2["entries"])) {
       push({
@@ -364,7 +374,12 @@ function conversation(host) {
       permissions.set(id, (optionId) => {
         permissions.delete(id);
         const chosen = options.find((option) => option.optionId === optionId);
-        push({ kind: "answered", id, name: chosen?.name ?? "cancelled" });
+        push({
+          kind: "answered",
+          id,
+          name: chosen?.name ?? "cancelled",
+          cancelled: chosen === void 0
+        });
         resolve({
           outcome: chosen === void 0 ? { outcome: "cancelled" } : { outcome: "selected", optionId: chosen.optionId }
         });
@@ -385,6 +400,7 @@ function conversation(host) {
       if (code === "E_WINDOW_AGENTS_OFF") {
         push({
           kind: "notice",
+          code: "agents-off",
           text: "Tyto does not let agents connect (setting agentsListen), so the agent cannot see the brief in front or propose edits. Turn it on and start a new conversation."
         });
       }
@@ -431,9 +447,12 @@ function conversation(host) {
       if (running?.program === program) {
         running = void 0;
         busy = false;
+        const code = String(exit.code ?? exit.signal);
         push({
           kind: "notice",
-          text: `The agent ended (exit ${String(exit.code ?? exit.signal)}). Your next message starts it again.`
+          code: "ended",
+          params: { exit: code },
+          text: `The agent ended (exit ${code}). Your next message starts it again.`
         });
         if (stderr.trim() !== "") host.log.info(`agent stderr: ${stderr.trim()}`);
       }
@@ -473,7 +492,8 @@ function conversation(host) {
     try {
       const agent = await ensure();
       if (agent === void 0) {
-        if (problem === null) push({ kind: "notice", text: "The agent did not start." });
+        if (problem === null)
+          push({ kind: "notice", code: "not-started", text: "The agent did not start." });
         return;
       }
       const answer = await agent.connection.request("session/prompt", {
@@ -485,7 +505,13 @@ function conversation(host) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
         problem = loginProblem(chosenAgent(host));
       } else {
-        push({ kind: "notice", text: `The turn failed: ${messageOf(cause)}` });
+        const said = messageOf(cause);
+        push({
+          kind: "notice",
+          code: "turn-failed",
+          params: { message: said },
+          text: `The turn failed: ${said}`
+        });
       }
     } finally {
       busy = false;
@@ -503,8 +529,16 @@ function conversation(host) {
       return { ...status(), history: messages };
     },
     send(text) {
-      if (busy) return { accepted: false, reason: "A turn is running; wait for it or stop it." };
-      if (text.trim() === "") return { accepted: false, reason: "The message is empty." };
+      if (busy) {
+        return {
+          accepted: false,
+          code: "busy",
+          reason: "A turn is running; wait for it or stop it."
+        };
+      }
+      if (text.trim() === "") {
+        return { accepted: false, code: "empty", reason: "The message is empty." };
+      }
       busy = true;
       push({ kind: "user", text });
       void turn(text);
@@ -533,6 +567,7 @@ function conversation(host) {
       busy = false;
       entries.length = 0;
       toolTitles.clear();
+      tytoTools.clear();
       messages = [];
       problem = null;
       window = "unknown";

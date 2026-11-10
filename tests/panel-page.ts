@@ -10,7 +10,9 @@ import type { Browser, Frame } from 'playwright-core';
  * measured there): a sandboxed iframe from another origin, on a white backdrop in both themes
  * (`--tyto-plugin-page`), in a document whose scheme is `light dark`. It answers the page's
  * `call`s with what the test hands it: `open` with the status and the history, and the first
- * `read` with the entries, every later one with none.
+ * `read` with the entries, every later one with none. `send` is accepted and makes the status
+ * busy; `send` and `cancel` are kept in `globalThis.calls` of the host page, for a test to read.
+ * `tell` posts what Tyto's window posts unasked (`document`, `language`).
  */
 
 const PANEL = new URL('../panel/', import.meta.url);
@@ -23,6 +25,8 @@ export interface PageScript {
   /** The frame's size in CSS pixels; Tyto's panel is about this. */
   readonly width?: number;
   readonly height?: number;
+  /** The browser's language, which the page falls back to when Tyto says none. */
+  readonly locale?: string;
 }
 
 function host(script: PageScript): string {
@@ -33,19 +37,22 @@ iframe{border:0;width:${String(script.width ?? 420)}px;height:${String(script.he
 </style></head><body>
 <iframe sandbox="allow-scripts" src="https://panel.test/index.html"></iframe>
 <script>
-const status = ${JSON.stringify(script.status)};
+let status = ${JSON.stringify(script.status)};
+globalThis.calls = [];
 const history = ${JSON.stringify(script.history ?? [])};
 let entries = ${JSON.stringify(script.entries ?? [])};
 const answers = {
   open: () => ({ ...status, history }),
   read: () => { const sent = entries; entries = []; return { entries: sent, status }; },
+  send: (params) => { calls.push(['send', params.text]); status = { ...status, busy: true }; return { accepted: true }; },
+  cancel: () => { calls.push(['cancel']); return status; },
 };
 window.addEventListener('message', (event) => {
   const m = event.data;
   if (!m || m.tyto !== 'panel' || m.type !== 'request') return;
   const answer = answers[m.args[0]];
   event.source.postMessage(answer
-    ? { tyto: 'panel', type: 'response', id: m.id, ok: true, value: answer() }
+    ? { tyto: 'panel', type: 'response', id: m.id, ok: true, value: answer(m.args[1] || {}) }
     : { tyto: 'panel', type: 'response', id: m.id, ok: false, message: 'unknown' }, '*');
 });
 </script></body></html>`;
@@ -53,7 +60,10 @@ window.addEventListener('message', (event) => {
 
 /** Opens the page in a new context of `browser` and answers its frame once it has loaded. */
 export async function openPanelPage(browser: Browser, script: PageScript): Promise<Frame> {
-  const context = await browser.newContext({ colorScheme: script.scheme ?? 'light' });
+  const context = await browser.newContext({
+    colorScheme: script.scheme ?? 'light',
+    ...(script.locale === undefined ? {} : { locale: script.locale }),
+  });
   await context.route('https://tyto.test/**', (route) =>
     route.fulfill({ contentType: 'text/html', body: host(script) }),
   );
@@ -69,4 +79,25 @@ export async function openPanelPage(browser: Browser, script: PageScript): Promi
   const frame = page.frames().find((candidate) => candidate.url().startsWith('https://panel.test'));
   if (frame === undefined) throw new Error('the panel frame never loaded');
   return frame;
+}
+
+/** Posts to the panel what Tyto's window posts unasked: `{ event: 'document', … }` and the like. */
+export async function tell(frame: Frame, event: Record<string, unknown>): Promise<void> {
+  await frame.page().evaluate((message) => {
+    const host = globalThis as unknown as {
+      document: {
+        querySelector(
+          selector: string,
+        ): { contentWindow: { postMessage(message: unknown, target: string): void } } | null;
+      };
+    };
+    host.document
+      .querySelector('iframe')!
+      .contentWindow.postMessage({ tyto: 'panel', type: 'event', ...message }, '*');
+  }, event);
+}
+
+/** What the page asked the plugin to do (`send`, `cancel`), in order. */
+export async function callsOf(frame: Frame): Promise<unknown[][]> {
+  return frame.page().evaluate(() => (globalThis as unknown as { calls: unknown[][] }).calls);
 }

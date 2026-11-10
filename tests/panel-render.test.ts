@@ -207,14 +207,14 @@ describe('the header and the log', () => {
       const page = globalThis as unknown as PageGlobals as PageGlobals;
       const box = page.document.querySelector('.problem') as Node;
       return {
-        badge: page.document.querySelector('#window')?.textContent,
+        reach: page.document.querySelector('.context-reach')?.textContent,
         boxes: page.document.querySelector('#log')!.querySelectorAll('.problem').length,
         code: Array.from(box.querySelectorAll('code')).map((node) => node.textContent),
         text: box.textContent,
       };
     });
     expect(seen).toEqual({
-      badge: 'no Tyto tools',
+      reach: 'the agent has no Tyto tools',
       boxes: 1,
       code: ['tyto'],
       text: message.replaceAll('`', ''),
