@@ -1,1 +1,6 @@
 * text=auto eol=lf
+# Built or written by a script, never by hand: folded in review (TYTO-666).
+dist/index.js linguist-generated=true
+adapter/launch.mjs linguist-generated=true
+adapter/lock.json linguist-generated=true
+pnpm-lock.yaml linguist-generated=true

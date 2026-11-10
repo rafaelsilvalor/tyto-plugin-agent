@@ -6,6 +6,13 @@ import {
   type StartedProcess,
 } from '@tyto/plugin-api';
 
+import {
+  INSTALL_ARGUMENT,
+  type LauncherLine,
+  STATUS_ARGUMENT,
+  type StatusLine,
+} from '../src/launcher/protocol.js';
+
 /**
  * A fake ACP agent behind the host's `startProcess` port: the program a real Tyto would start for
  * `process:claude-agent-acp`, speaking newline-delimited JSON-RPC on stdin and stdout as ACP's
@@ -40,7 +47,7 @@ export interface TurnTools {
 
 export interface FakeAgentOptions {
   /** The host refuses the start with this code, as the desktop's adapter would. */
-  readonly refuse?: 'E_PROCESS_NOT_FOUND' | 'E_PROCESS_RESTRICTED';
+  readonly refuse?: 'E_PROCESS_SCRIPT_MISSING' | 'E_PROCESS_RESTRICTED';
   /** `session/new` answers ACP's "authentication required", until the test calls `signIn`. */
   readonly signedOut?: boolean;
   /**
@@ -69,12 +76,21 @@ export interface FakeAgentOptions {
    * it in `session/new`. Absent, no init is sent at all: an agent with no such report.
    */
   readonly init?: readonly { readonly name: string; readonly status: string }[];
+  /**
+   * What the launcher (`adapter/launch.mjs`, TYTO-666) answers to `--tyto-status`. Absent, the
+   * adapter is installed and `claude` found, so a test about something else starts the agent.
+   */
+  readonly adapter?: Partial<Omit<StatusLine, 'tyto'>>;
+  /** How `--tyto-install` ends: installed (the default), or failed with this code. */
+  readonly install?: 'installed' | 'integrity' | 'network';
 }
 
 export interface FakeAgent {
   readonly capabilities: Partial<HostCapabilities>;
-  /** Every program started: its name and arguments. */
+  /** Every agent started: its name and arguments. The launcher's own runs are in `launched`. */
   readonly started: { program: string; args: readonly string[] }[];
+  /** Every run of the launcher's protocol (`--tyto-status`, `--tyto-install`), in order. */
+  readonly launched: string[];
   /** Every request and notification the client sent, by method, with its params. */
   readonly heard: { method: string; params: unknown }[];
   readonly killed: () => number;
@@ -121,8 +137,42 @@ const defaultTurn = async (tools: TurnTools): Promise<string> => {
   return 'end_turn';
 };
 
+/** The launcher's protocol, as `adapter/launch.mjs` speaks it: JSON lines, then an exit. */
+function launcher(
+  events: ProcessEvents,
+  lines: readonly LauncherLine[],
+  code: number,
+): StartedProcess {
+  const encoder = new TextEncoder();
+  queueMicrotask(() => {
+    for (const line of lines)
+      events.stdout(
+        encoder.encode(`${JSON.stringify(line)}
+`),
+      );
+    events.exit({ code, signal: null });
+  });
+  return {
+    cwd: FOLDER,
+    write: () => Promise.resolve(),
+    end: () => Promise.resolve(),
+    kill: () => undefined,
+  };
+}
+
 export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
   const started: { program: string; args: readonly string[] }[] = [];
+  const launched: string[] = [];
+  let status: Omit<StatusLine, 'tyto'> = {
+    data: true,
+    installed: true,
+    previous: null,
+    version: '0.104.1',
+    bytes: 53_567_526,
+    source: 'registry.npmjs.org',
+    claude: 'found',
+    ...options.adapter,
+  };
   const heard: { method: string; params: unknown }[] = [];
   const cache = new Map<string, Uint8Array>();
   const terminals: { program: string; args: readonly string[] }[] = [];
@@ -288,6 +338,7 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
   const window = options.window ?? WINDOW_SERVER;
   return {
     started,
+    launched,
     heard,
     cache,
     terminals,
@@ -305,6 +356,32 @@ export function fakeAgent(options: FakeAgentOptions = {}): FakeAgent {
       },
       startProcess: (_plugin, program, args, events) => {
         if (options.refuse !== undefined) return Promise.reject(refusal(options.refuse));
+        if (args[0] === STATUS_ARGUMENT) {
+          launched.push('status');
+          return Promise.resolve(launcher(events, [{ tyto: 'status', ...status }], 0));
+        }
+        if (args[0] === INSTALL_ARGUMENT) {
+          launched.push('install');
+          const ending = options.install ?? 'installed';
+          if (ending === 'installed') status = { ...status, installed: true, previous: null };
+          return Promise.resolve(
+            launcher(
+              events,
+              [
+                { tyto: 'progress', done: 1, total: 2 },
+                { tyto: 'progress', done: 2, total: 2 },
+                ending === 'installed'
+                  ? { tyto: 'installed', version: status.version }
+                  : {
+                      tyto: 'failed',
+                      code: ending,
+                      message: `the fake launcher failed: ${ending}`,
+                    },
+              ],
+              ending === 'installed' ? 0 : 1,
+            ),
+          );
+        }
         started.push({ program, args });
         return Promise.resolve(run(events));
       },

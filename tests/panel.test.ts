@@ -290,15 +290,15 @@ describe('signing in from the panel (TYTO-657)', () => {
 });
 
 describe('the states the card names', () => {
-  it('says how to install the adapter when it is not on PATH', async () => {
-    const { call } = await panel({ refuse: 'E_PROCESS_NOT_FOUND' });
+  it('says to reinstall the plugin when its own program is missing', async () => {
+    const { call } = await panel({ refuse: 'E_PROCESS_SCRIPT_MISSING' });
     const status = await call<Status>('open');
     expect(status.running).toBe(false);
     expect(status.problem).toEqual({
-      kind: 'not-installed',
+      kind: 'script-missing',
       message:
-        "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
-      steps: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+        "The agent plugin's own program, claude-agent-acp, is missing from its folder. Reinstall the plugin.",
+      steps: [],
       params: { label: 'Claude', program: 'claude-agent-acp' },
     });
   });
@@ -542,5 +542,89 @@ describe('the history kept per folder', () => {
     for (const [key, bytes] of agent.cache) elsewhere.cache.set(key, bytes);
     const second = await panel({}, elsewhere);
     expect((await second.call<{ history: unknown[] }>('open')).history).toEqual([]);
+  });
+});
+
+describe('the adapter, fetched on first use (TYTO-666)', () => {
+  /** Opens until the status has no `downloading` problem: the page's polling, compressed. */
+  async function settled(call: Awaited<ReturnType<typeof panel>>['call']): Promise<Status> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const { status } = await call<{ status: Status }>('read', { after: 0 });
+      if (status.problem?.kind !== 'downloading') return status;
+      if (Date.now() > deadline) throw new Error('the download never ended');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('offers the download with its size and source, and starts nothing before a yes', async () => {
+    const { agent, call } = await panel({ adapter: { installed: false } });
+    const status = await call<Status>('open');
+    expect(status.running).toBe(false);
+    expect(status.problem).toMatchObject({
+      kind: 'not-downloaded',
+      params: { label: 'Claude', version: '0.104.1', size: '54', source: 'registry.npmjs.org' },
+      canDownload: true,
+    });
+    expect(status.problem?.message).toContain('from registry.npmjs.org, about 54 MB on disk');
+    expect(agent.launched).toEqual(['status']);
+    expect(agent.started).toEqual([]);
+  });
+
+  it('downloads on a yes, says how far it got, then starts the agent at the next open', async () => {
+    const { agent, call } = await panel({ adapter: { installed: false } });
+    await call<Status>('open');
+    expect(await call('download')).toEqual({ started: true });
+    expect(await settled(call)).toMatchObject({ problem: null });
+    expect(agent.launched).toEqual(['status', 'install']);
+    const opened = await call<Status>('open');
+    expect(opened).toMatchObject({ running: true, problem: null });
+    expect(agent.started).toEqual([{ program: 'claude-agent-acp', args: [] }]);
+  });
+
+  it('refuses a second download while one runs', async () => {
+    const { call } = await panel({ adapter: { installed: false } });
+    await call<Status>('open');
+    expect(await call('download')).toEqual({ started: true });
+    expect(await call('download')).toEqual({ started: false, code: 'running' });
+  });
+
+  it('says a download that failed failed, and installed nothing', async () => {
+    const { agent, call } = await panel({ adapter: { installed: false }, install: 'integrity' });
+    await call<Status>('open');
+    await call('download');
+    expect((await settled(call)).problem).toMatchObject({
+      kind: 'download-failed',
+      params: { code: 'integrity', reason: 'the fake launcher failed: integrity' },
+    });
+    expect(agent.started).toEqual([]);
+  });
+
+  it('replaces an earlier pin the person accepted without asking again, as Zed does', async () => {
+    const { agent, call } = await panel({ adapter: { installed: false, previous: '0.104.0' } });
+    const status = await call<Status>('open');
+    expect(status.problem?.kind).toBe('downloading');
+    expect(await settled(call)).toMatchObject({ problem: null });
+    expect(agent.launched).toEqual(['status', 'install']);
+  });
+
+  it('says when claude is missing, or only an npm shim, before any download', async () => {
+    const missing = await panel({ adapter: { installed: false, claude: 'missing' } });
+    expect((await missing.call<Status>('open')).problem).toMatchObject({
+      kind: 'no-claude',
+      params: { found: 'missing' },
+    });
+    const shim = await panel({ adapter: { claude: 'shim' } });
+    expect((await shim.call<Status>('open')).problem).toMatchObject({
+      kind: 'no-claude',
+      params: { found: 'shim' },
+    });
+    expect([...missing.agent.started, ...shim.agent.started]).toEqual([]);
+  });
+
+  it('says a Tyto with no data folder for programs is too old', async () => {
+    const { agent, call } = await panel({ adapter: { data: false, installed: false } });
+    expect((await call<Status>('open')).problem).toMatchObject({ kind: 'old-tyto' });
+    expect(agent.started).toEqual([]);
   });
 });

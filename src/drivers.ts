@@ -12,12 +12,16 @@ export interface Driver {
   readonly id: string;
   /** What the panel calls it. */
   readonly label: string;
-  /** The program on the person's PATH, exactly as `process:<program>` names it. */
+  /** The program, exactly as `process:<program>` names it. */
   readonly program: string;
   /** Arguments always passed, before the person's own `agent.args`. */
   readonly args: readonly string[];
-  /** What the person runs to install the program, shown when it is missing. */
-  readonly install: readonly string[];
+  /**
+   * The program is this plugin's launcher (`adapter/launch.mjs`, Tyto ADR 0184 `programs`), which
+   * fetches the agent's adapter from npm on first use (TYTO-666): the panel asks it what is
+   * installed before it starts a conversation, and offers the download.
+   */
+  readonly downloads: boolean;
   /**
    * The sign-in the panel prefers among the agent's own terminal methods (ACP `authMethods` of
    * type `terminal`, read from `initialize`). The arguments always come from the agent, so they
@@ -106,11 +110,12 @@ export const DRIVERS: readonly Driver[] = [
   {
     id: 'claude',
     label: 'Claude',
-    // The ACP adapter for Claude Code (Apache-2.0), which drives the person's own `claude` CLI
-    // and its login: github.com/agentclientprotocol/claude-agent-acp.
+    // The ACP adapter for Claude Code, which drives the person's own `claude` CLI and its login:
+    // github.com/agentclientprotocol/claude-agent-acp. Fetched from npm on first use at the
+    // version adapter/lock.json pins, never committed (TYTO-666).
     program: 'claude-agent-acp',
     args: [],
-    install: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+    downloads: true,
     // The adapter's subscription sign-in: it runs the Claude CLI's own login (TYTO-657).
     preferredLogin: 'claude-ai-login',
     serverReport: CLAUDE_SERVER_REPORT,

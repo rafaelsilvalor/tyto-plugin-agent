@@ -114,6 +114,57 @@ function connect(transport, options = {}) {
   };
 }
 
+// src/launcher/protocol.ts
+var STATUS_ARGUMENT = "--tyto-status";
+var INSTALL_ARGUMENT = "--tyto-install";
+
+// src/adapter.ts
+async function runLines(host, program, args, onLine) {
+  const started = await host.process.start(program, [...args]);
+  const decoder = new TextDecoder();
+  let buffered = "";
+  started.onStdout((bytes) => {
+    buffered += decoder.decode(bytes, { stream: true });
+    for (let end = buffered.indexOf("\n"); end >= 0; end = buffered.indexOf("\n")) {
+      const text = buffered.slice(0, end).trim();
+      buffered = buffered.slice(end + 1);
+      if (text === "") continue;
+      try {
+        const line = JSON.parse(text);
+        if (typeof line === "object" && line !== null && typeof line.tyto === "string")
+          onLine(line);
+      } catch {
+      }
+    }
+  });
+  const exit = await started.exited;
+  return exit.code;
+}
+async function adapterStatus(host, program) {
+  let status;
+  await runLines(host, program, [STATUS_ARGUMENT], (line) => {
+    if (line.tyto === "status") status = line;
+  });
+  return status;
+}
+async function installAdapter(host, program, onProgress) {
+  let outcome;
+  const exit = await runLines(host, program, [INSTALL_ARGUMENT], (line) => {
+    if (line.tyto === "progress") onProgress(line.done, line.total);
+    else if (line.tyto === "installed") outcome = { installed: true };
+    else if (line.tyto === "failed")
+      outcome = { installed: false, code: line.code, message: line.message };
+  });
+  return outcome ?? {
+    installed: false,
+    code: "unknown",
+    message: `the download ended without saying how (exit ${String(exit)})`
+  };
+}
+function megabytes(bytes) {
+  return String(Math.max(1, Math.round(bytes / 1e6)));
+}
+
 // src/drivers.ts
 var CLAUDE_AUTH_REPORT = {
   notification: "_auth/status_update",
@@ -143,11 +194,12 @@ var DRIVERS = [
   {
     id: "claude",
     label: "Claude",
-    // The ACP adapter for Claude Code (Apache-2.0), which drives the person's own `claude` CLI
-    // and its login: github.com/agentclientprotocol/claude-agent-acp.
+    // The ACP adapter for Claude Code, which drives the person's own `claude` CLI and its login:
+    // github.com/agentclientprotocol/claude-agent-acp. Fetched from npm on first use at the
+    // version adapter/lock.json pins, never committed (TYTO-666).
     program: "claude-agent-acp",
     args: [],
-    install: ["npm install -g @agentclientprotocol/claude-agent-acp"],
+    downloads: true,
     // The adapter's subscription sign-in: it runs the Claude CLI's own login (TYTO-657).
     preferredLogin: "claude-ai-login",
     serverReport: CLAUDE_SERVER_REPORT,
@@ -235,11 +287,14 @@ function messageOf(cause) {
 function startProblem(choice, cause) {
   const { driver } = choice;
   switch (codeOf(cause)) {
+    // The program is the plugin's own launcher (ADR 0184), so a missing one is a broken install,
+    // never a program the person forgot to put on PATH.
+    case "E_PROCESS_SCRIPT_MISSING":
     case "E_PROCESS_NOT_FOUND":
       return {
-        kind: "not-installed",
-        message: `${driver.label}'s ACP adapter, ${driver.program}, is not on your PATH. Tyto installs no agent.`,
-        steps: [...driver.install],
+        kind: "script-missing",
+        message: `The agent plugin's own program, ${driver.program}, is missing from its folder. Reinstall the plugin.`,
+        steps: [],
         params: { label: driver.label, program: driver.program }
       };
     case "E_PROCESS_RESTRICTED":
@@ -272,6 +327,54 @@ function loginProblem(choice, method) {
     steps: [],
     params: { label },
     canLogIn: true
+  };
+}
+function adapterProblem(choice, status) {
+  const label = choice.driver.label;
+  if (!status.data) {
+    return {
+      kind: "old-tyto",
+      message: `The agent panel needs Tyto 0.18 or later, which gives a plugin's program a folder to download ${label}'s adapter into. Update Tyto.`,
+      steps: [],
+      params: { label }
+    };
+  }
+  if (status.claude !== "found") {
+    return {
+      kind: "no-claude",
+      message: status.claude === "shim" ? `${label} Code was found only as an npm shim (claude.cmd), which the adapter cannot start. Install ${label} Code natively, so that claude.exe is on your PATH, then press New.` : `${label} Code is not installed: the panel talks to your own \`claude\`, and it is not on your PATH. Install ${label} Code, then press New.`,
+      steps: [],
+      params: { label, found: status.claude }
+    };
+  }
+  if (!status.installed) {
+    const size = megabytes(status.bytes);
+    return {
+      kind: "not-downloaded",
+      message: `${label}'s adapter is not downloaded yet. **Download** fetches @agentclientprotocol/claude-agent-acp ${status.version} from ${status.source}, about ${size} MB on disk, into Tyto's folder for this plugin, and checks every file against the hash this plugin pins. It includes Anthropic's Claude Agent SDK, under Anthropic's own terms.`,
+      steps: [],
+      params: { label, version: status.version, size, source: status.source },
+      canDownload: true
+    };
+  }
+  return void 0;
+}
+function downloadingProblem(choice, done, total) {
+  const label = choice.driver.label;
+  return {
+    kind: "downloading",
+    message: `Downloading ${label}'s adapter: ${String(done)} of ${String(total)} packages.`,
+    steps: [],
+    params: { label, done: String(done), total: String(total) }
+  };
+}
+function downloadFailedProblem(choice, outcome) {
+  const label = choice.driver.label;
+  return {
+    kind: "download-failed",
+    message: `${label}'s adapter did not download, and nothing was installed (${outcome.code}): ${outcome.message}. Press New to try again.`,
+    steps: [],
+    params: { label, code: outcome.code, reason: outcome.message }
   };
 }
 var WINDOW_SERVER = "tyto";
@@ -335,6 +438,7 @@ function conversation(host) {
   let window = "unknown";
   let folder = null;
   let loginMethod;
+  let downloading;
   let messages = [];
   let reply = "";
   const permissions = /* @__PURE__ */ new Map();
@@ -438,8 +542,54 @@ function conversation(host) {
       return [];
     }
   }
+  function download() {
+    if (downloading !== void 0) return { started: false, code: "running" };
+    const choice = chosenAgent(host);
+    problem = downloadingProblem(choice, 0, 0);
+    downloading = installAdapter(host, choice.driver.program, (done, total) => {
+      problem = downloadingProblem(choice, done, total);
+    }).catch((cause) => ({
+      installed: false,
+      code: "unknown",
+      message: startProblem(choice, cause).message
+    })).then((outcome) => {
+      problem = outcome.installed ? null : downloadFailedProblem(choice, outcome);
+    }).finally(() => {
+      downloading = void 0;
+    });
+    return { started: true };
+  }
+  async function prepared(choice) {
+    if (downloading !== void 0) return false;
+    let found;
+    try {
+      found = await adapterStatus(host, choice.driver.program);
+    } catch (cause) {
+      problem = startProblem(choice, cause);
+      return false;
+    }
+    if (found === void 0) {
+      problem = {
+        kind: "failed",
+        message: "The agent plugin's launcher said nothing about the adapter.",
+        steps: []
+      };
+      return false;
+    }
+    if (!found.installed && found.data && found.claude === "found" && found.previous !== null) {
+      download();
+      return false;
+    }
+    const standing = adapterProblem(choice, found);
+    if (standing !== void 0) {
+      problem = standing;
+      return false;
+    }
+    return true;
+  }
   async function start() {
     const choice = chosenAgent(host);
+    if (choice.driver.downloads && !await prepared(choice)) return void 0;
     let program;
     try {
       program = await host.process.start(choice.driver.program, choice.args);
@@ -625,6 +775,7 @@ function conversation(host) {
       window = "unknown";
       if (ending !== void 0) await ending.program.kill();
     },
+    download,
     async login() {
       const method = loginMethod;
       if (method === void 0) return { opened: false, code: "no-method" };
@@ -690,6 +841,8 @@ function activate(host) {
             return ok(chat.status());
           case "login":
             return ok(await chat.login());
+          case "download":
+            return ok(chat.download());
           default:
             return ok({ unknown: method });
         }

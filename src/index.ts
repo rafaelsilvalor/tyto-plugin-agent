@@ -34,6 +34,8 @@ function stringOf(value: unknown): string {
  * - `cancel`: stop the running turn.
  * - `reset`: end the agent and start the next message in a fresh conversation.
  * - `login`: open a Tyto terminal running the agent's own sign-in, as its `initialize` offered.
+ * - `download`: fetch the agent's adapter from npm, which the person accepted (TYTO-666); its
+ *   progress is the status's `downloading` problem.
  */
 export function activate(host: PluginHost): Disposable {
   const chat = conversation(host);
@@ -68,6 +70,8 @@ export function activate(host: PluginHost): Disposable {
             return ok(chat.status());
           case 'login':
             return ok(await chat.login());
+          case 'download':
+            return ok(chat.download());
           default:
             return ok({ unknown: method });
         }

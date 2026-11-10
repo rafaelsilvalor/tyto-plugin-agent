@@ -69,8 +69,22 @@ const WORDS = {
       empty: 'The message is empty.',
     },
     problems: {
-      'not-installed': ({ label, program }) =>
-        `${label}'s ACP adapter, ${program}, is not on your PATH. Tyto installs no agent.`,
+      'script-missing': ({ program }) =>
+        `The agent plugin's own program, ${program}, is missing from its folder. Reinstall the plugin.`,
+      'old-tyto': ({ label }) =>
+        `The agent panel needs Tyto 0.18 or later, which gives a plugin's program a folder to download ${label}'s adapter into. Update Tyto.`,
+      'no-claude': ({ label, found }) =>
+        found === 'shim'
+          ? `${label} Code was found only as an npm shim (claude.cmd), which the adapter cannot start. Install ${label} Code natively, so that claude.exe is on your PATH, then press New.`
+          : `${label} Code is not installed: the panel talks to your own \`claude\`, and it is not on your PATH. Install ${label} Code, then press New.`,
+      'not-downloaded': ({ label, version, size, source }) =>
+        `${label}'s adapter is not downloaded yet. **Download** fetches @agentclientprotocol/claude-agent-acp ${version} from ${source}, about ${size} MB on disk, into Tyto's folder for this plugin, and checks every file against the hash this plugin pins. It includes Anthropic's Claude Agent SDK, under Anthropic's own terms.`,
+      downloading: ({ label, done, total }) =>
+        total === '0'
+          ? `Downloading ${label}'s adapter…`
+          : `Downloading ${label}'s adapter: ${done} of ${total} packages.`,
+      'download-failed': ({ label, code, reason }) =>
+        `${label}'s adapter did not download, and nothing was installed (${code}): ${reason}. Press New to try again.`,
       'not-logged-in': ({ label, canLogIn }) =>
         canLogIn
           ? `${label} is not signed in. **Log in** opens a Tyto terminal where ${label}'s own sign-in runs and your browser opens on its page; Tyto never sees or stores the login.`
@@ -84,6 +98,8 @@ const WORDS = {
           ? `${label} started without Tyto's tools, so it cannot see the brief in front or act on it. The likely cause is an MCP server allowlist in your Claude Code settings (often set by your organisation, as allowedMcpServers) that does not list \`tyto\`. Ask your organisation's admin to allow the MCP server \`tyto\`; Tyto does not work around that policy.`
           : `${label} has Tyto's tools configured, but they did not connect (status: ${status}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
     },
+    download: 'Download',
+    downloaded: (label) => `${label}'s adapter is downloaded.`,
     logIn: (label) => `Log in to ${label}`,
     tryAgain: 'Try again',
     loginOpened:
@@ -159,8 +175,22 @@ const WORDS = {
       empty: 'A mensagem está vazia.',
     },
     problems: {
-      'not-installed': ({ label, program }) =>
-        `O adaptador ACP do ${label}, ${program}, não está no seu PATH. O Tyto não instala agentes.`,
+      'script-missing': ({ program }) =>
+        `O programa do próprio plugin do agente, ${program}, sumiu da pasta dele. Reinstale o plugin.`,
+      'old-tyto': ({ label }) =>
+        `O painel do agente precisa do Tyto 0.18 ou mais novo, que dá ao programa de um plugin uma pasta para baixar o adaptador do ${label}. Atualize o Tyto.`,
+      'no-claude': ({ label, found }) =>
+        found === 'shim'
+          ? `O ${label} Code só foi encontrado como atalho do npm (claude.cmd), que o adaptador não consegue abrir. Instale o ${label} Code nativo, para que o claude.exe esteja no seu PATH, e clique em Nova.`
+          : `O ${label} Code não está instalado: o painel conversa com o seu próprio \`claude\`, e ele não está no seu PATH. Instale o ${label} Code e clique em Nova.`,
+      'not-downloaded': ({ label, version, size, source }) =>
+        `O adaptador do ${label} ainda não foi baixado. **Baixar** busca o @agentclientprotocol/claude-agent-acp ${version} em ${source}, cerca de ${size} MB em disco, para a pasta do Tyto deste plugin, e confere cada arquivo com o hash que o plugin fixa. Ele inclui o Claude Agent SDK da Anthropic, sob os termos da própria Anthropic.`,
+      downloading: ({ label, done, total }) =>
+        total === '0'
+          ? `Baixando o adaptador do ${label}…`
+          : `Baixando o adaptador do ${label}: ${done} de ${total} pacotes.`,
+      'download-failed': ({ label, code, reason }) =>
+        `O adaptador do ${label} não foi baixado, e nada foi instalado (${code}): ${reason}. Clique em Nova para tentar de novo.`,
       'not-logged-in': ({ label, canLogIn }) =>
         canLogIn
           ? `O ${label} não está conectado. **Entrar** abre um terminal do Tyto onde roda o login do próprio ${label}, e o seu navegador abre na página dele; o Tyto nunca vê nem guarda o login.`
@@ -174,6 +204,8 @@ const WORDS = {
           ? `O ${label} iniciou sem as ferramentas do Tyto, então não vê o brief da frente nem age nele. A causa provável é uma lista de servidores MCP permitidos nas configurações do Claude Code (muitas vezes definida pela sua organização, como allowedMcpServers) que não inclui \`tyto\`. Peça ao administrador da sua organização para permitir o servidor MCP \`tyto\`; o Tyto não contorna essa política.`
           : `O ${label} tem as ferramentas do Tyto configuradas, mas elas não conectaram (status: ${status}), então ele não vê o brief da frente nem age nele. Clique em Nova para recomeçar; se acontecer de novo, o log MCP do Claude Code para \`tyto\` diz por quê.`,
     },
+    download: 'Baixar',
+    downloaded: (label) => `O adaptador do ${label} foi baixado.`,
     logIn: (label) => `Entrar no ${label}`,
     tryAgain: 'Tentar de novo',
     loginOpened:

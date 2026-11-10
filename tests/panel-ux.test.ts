@@ -280,15 +280,15 @@ describe('the language', () => {
     await waitForText(frame, '#send', 'Enviar');
   });
 
-  it('says a problem, its step and a notice in Portuguese from their codes', async () => {
+  it('says a problem and a notice in Portuguese from their codes', async () => {
     const frame = await openPanelPage(browser, {
       status: {
         ...STATUS,
         problem: {
-          kind: 'not-installed',
+          kind: 'script-missing',
           message:
-            "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
-          steps: ['npm install -g @agentclientprotocol/claude-agent-acp'],
+            "The agent plugin's own program, claude-agent-acp, is missing from its folder. Reinstall the plugin.",
+          steps: [],
           params: { label: 'Claude', program: 'claude-agent-acp' },
         },
       },
@@ -306,10 +306,7 @@ describe('the language', () => {
     await frame.waitForSelector('.notice');
     await frame.waitForSelector('.problem');
     expect(await textOf(frame, '.problem .said')).toBe(
-      'O adaptador ACP do Claude, claude-agent-acp, não está no seu PATH. O Tyto não instala agentes.',
-    );
-    expect(await textOf(frame, '.problem code')).toBe(
-      'npm install -g @agentclientprotocol/claude-agent-acp',
+      'O programa do próprio plugin do agente, claude-agent-acp, sumiu da pasta dele. Reinstale o plugin.',
     );
     expect(await textOf(frame, '.notice')).toBe(
       'O agente encerrou (saída 1). A sua próxima mensagem o inicia de novo.',
@@ -320,7 +317,7 @@ describe('the language', () => {
     await waitForText(
       frame,
       '.problem .said',
-      "Claude's ACP adapter, claude-agent-acp, is not on your PATH. Tyto installs no agent.",
+      "The agent plugin's own program, claude-agent-acp, is missing from its folder. Reinstall the plugin.",
     );
     expect(
       await frame.evaluate(
@@ -406,5 +403,67 @@ describe('signing in (TYTO-657)', () => {
     await frame.waitForSelector('.problem .said');
     expect(await textOf(frame, '.problem .said')).toContain('offers no sign-in Tyto can open');
     expect(await frame.$('.problem .choices')).toBeNull();
+  });
+});
+
+describe('downloading the adapter (TYTO-666)', () => {
+  const OFFER = {
+    ...STATUS,
+    busy: false,
+    running: false,
+    problem: {
+      kind: 'not-downloaded',
+      message: "Claude's adapter is not downloaded yet.",
+      steps: [],
+      params: { label: 'Claude', version: '0.104.1', size: '54', source: 'registry.npmjs.org' },
+      canDownload: true,
+    },
+  };
+  const progress = (done: string, total: string) => ({
+    ...OFFER,
+    problem: {
+      kind: 'downloading',
+      message: 'Downloading.',
+      steps: [],
+      params: { label: 'Claude', done, total },
+    },
+  });
+
+  it('names the size and the source, downloads on Download, and starts the agent after', async () => {
+    const frame = await openPanelPage(browser, {
+      status: OFFER,
+      afterDownload: [progress('1', '107'), progress('107', '107'), { ...OFFER, problem: null }],
+    });
+    await frame.waitForSelector('.problem .choices button.primary');
+    expect(await textOf(frame, '.problem .said')).toBe(
+      "Claude's adapter is not downloaded yet. Download fetches @agentclientprotocol/claude-agent-acp 0.104.1 from registry.npmjs.org, about 54 MB on disk, into Tyto's folder for this plugin, and checks every file against the hash this plugin pins. It includes Anthropic's Claude Agent SDK, under Anthropic's own terms.",
+    );
+    expect(await textOf(frame, '.problem .choices button.primary')).toBe('Download');
+    await frame.click('.problem .choices button.primary');
+    await waitForText(frame, '.notice', "Claude's adapter is downloaded.");
+    // Progress replaced its own line: one box for the download, not one per package.
+    expect(
+      await frame.evaluate(
+        () =>
+          (
+            globalThis as unknown as {
+              document: { querySelectorAll(selector: string): ArrayLike<unknown> };
+            }
+          ).document.querySelectorAll('.problem[data-kind="downloading"]').length,
+      ),
+    ).toBe(1);
+    const calls = await callsOf(frame);
+    const download = calls.findIndex((call) => call[0] === 'download');
+    expect(download).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(download + 1).some((call) => call[0] === 'open')).toBe(true);
+  });
+
+  it('offers it in Portuguese', async () => {
+    const frame = await openPanelPage(browser, { status: OFFER, locale: 'pt-BR' });
+    await frame.waitForSelector('.problem .choices button.primary');
+    expect(await textOf(frame, '.problem .choices button.primary')).toBe('Baixar');
+    expect(await textOf(frame, '.problem .said')).toContain(
+      'cerca de 54 MB em disco, para a pasta do Tyto deste plugin',
+    );
   });
 });
