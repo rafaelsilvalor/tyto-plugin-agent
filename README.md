@@ -70,9 +70,15 @@ You need, on the computer that runs Tyto:
 1. **Tyto desktop with the plugin contract 0.18 or newer** (`engine: ">=0.18"`): it runs the
    plugin's own launcher on Tyto's Node (Tyto ADR 0184) and gives it a data folder (ADR 0187).
    An older Tyto refuses the plugin at start and says which contract it needs.
-2. **Claude Code, installed natively**, so that `claude` (on Windows `claude.exe`) is on your
-   `PATH`. You do not have to sign in first: the panel offers **Log in** (below). An npm-only
-   install (`claude.cmd`) is refused with a message: the adapter cannot start a `.cmd`.
+2. **Claude Code**, so that `claude` (on Windows `claude.exe`) is on your `PATH`. You do not have
+   to sign in first: the panel offers **Log in** (below). On Windows an npm install works too:
+   the launcher reads `claude.cmd` and starts the `claude.exe` it points at, which Claude Code's
+   npm package ships from 2.1.200 on. An older npm install, whose `claude.cmd` runs `cli.js`, is
+   refused with a message saying to update it: the adapter cannot start a `.js` on Windows.
+
+Behind a proxy, set `HTTPS_PROXY` (and `NO_PROXY` if you need it) before you start Tyto: Tyto
+passes both to the launcher, which sends the download through that proxy. A proxy that asks for
+its own sign-in is not supported.
 
 Nothing else. **The ACP adapter is downloaded the first time you open the panel, as Zed does**,
 and only once you press **Download**. The panel first says what it fetches and from where:

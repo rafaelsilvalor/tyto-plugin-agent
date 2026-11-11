@@ -287,7 +287,7 @@ export function adapterProblem(choice: AgentChoice, status: StatusLine): Problem
       kind: 'no-claude',
       message:
         status.claude === 'shim'
-          ? `${label} Code was found only as an npm shim (claude.cmd), which the adapter cannot start. Install ${label} Code natively, so that claude.exe is on your PATH, then press New.`
+          ? `${label} Code was found only as an old npm install (claude.cmd running cli.js), which the adapter cannot start. Update it with \`npm install -g @anthropic-ai/claude-code\`, or install ${label} Code natively, then press New.`
           : `${label} Code is not installed: the panel talks to your own \`claude\`, and it is not on your PATH. Install ${label} Code, then press New.`,
       steps: [],
       params: { label, found: status.claude },

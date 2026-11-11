@@ -15,7 +15,7 @@ import { gzipSync } from 'node:zlib';
 import { PROGRAM_DATA_VARIABLE } from '@tyto/plugin-api';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { findClaude } from './claude.js';
+import { findClaude, shimTarget } from './claude.js';
 import {
   type AdapterLock,
   InstallError,
@@ -320,28 +320,93 @@ describe('parseLock', () => {
 });
 
 describe('findClaude', () => {
-  const on =
-    (...files: string[]) =>
-    (path: string) =>
-      files.includes(path);
+  /** A disk of empty files, and shims whose text is given. */
+  const disk = (files: readonly string[], shims: Readonly<Record<string, string>> = {}) => ({
+    isFile: (path: string) => files.includes(path) || path in shims,
+    readText: (path: string) => shims[path],
+  });
 
-  it('takes claude.exe on Windows, from Path in any case, and never the npm shim', () => {
+  /** What npm's cmd-shim writes for each bin, as measured with npm 11 on 2026-11-11 (TYTO-667). */
+  const EXE_SHIM = [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'EXIT /b',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+  ].join('\r\n');
+  const SCRIPT_SHIM = [
+    '@ECHO off',
+    'CALL :find_dp0',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    ')',
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*',
+  ].join('\r\n');
+  const NPM_EXE = 'C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe';
+  const NPM_SHIM = 'C:\\npm\\claude.cmd';
+
+  it('takes claude.exe on Windows, from Path in any case, in PATH order with shims', () => {
     expect(
       findClaude(
         'win32',
         { Path: 'C:\\npm;C:\\bin' },
-        on('C:\\npm\\claude.cmd', 'C:\\bin\\claude.exe'),
+        disk(['C:\\bin\\claude.exe', NPM_EXE], { [NPM_SHIM]: EXE_SHIM }),
+      ),
+    ).toEqual({ found: 'found', path: NPM_EXE });
+    expect(
+      findClaude(
+        'win32',
+        { PATH: 'C:\\bin;C:\\npm' },
+        disk(['C:\\bin\\claude.exe', NPM_EXE], { [NPM_SHIM]: EXE_SHIM }),
       ),
     ).toEqual({ found: 'found', path: 'C:\\bin\\claude.exe' });
-    expect(findClaude('win32', { PATH: 'C:\\npm' }, on('C:\\npm\\claude.cmd'))).toEqual({
+    expect(findClaude('win32', { PATH: 'C:\\npm' }, disk([]))).toEqual({ found: 'missing' });
+  });
+
+  it('follows an npm shim to the claude.exe it starts, reading it and never running it', () => {
+    expect(
+      findClaude('win32', { PATH: 'C:\\npm' }, disk([NPM_EXE], { [NPM_SHIM]: EXE_SHIM })),
+    ).toEqual({ found: 'found', path: NPM_EXE });
+    // The shim names an .exe that is not there.
+    expect(findClaude('win32', { PATH: 'C:\\npm' }, disk([], { [NPM_SHIM]: EXE_SHIM }))).toEqual({
       found: 'shim',
     });
-    expect(findClaude('win32', { PATH: 'C:\\npm' }, on())).toEqual({ found: 'missing' });
+  });
+
+  it('refuses a shim that runs cli.js, or points outside its own node_modules', () => {
+    const script = 'C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js';
+    expect(
+      findClaude(
+        'win32',
+        { PATH: 'C:\\npm' },
+        disk([script, 'C:\\npm\\node.exe'], { [NPM_SHIM]: SCRIPT_SHIM }),
+      ),
+    ).toEqual({ found: 'shim' });
+    for (const outside of [
+      '"%dp0%\\..\\elsewhere\\node_modules\\claude.exe" %*',
+      '"%dp0%\\node_modules\\..\\..\\Windows\\claude.exe" %*',
+      '"%dp0%\\claude.exe" %*',
+    ]) {
+      expect(
+        shimTarget('C:\\npm', outside, () => true),
+        outside,
+      ).toBeUndefined();
+    }
+    // A bare `claude` (the POSIX shim npm also writes) is no program Windows starts.
+    expect(findClaude('win32', { PATH: 'C:\\npm' }, disk(['C:\\npm\\claude']))).toEqual({
+      found: 'shim',
+    });
   });
 
   it('takes claude on POSIX, and skips a relative PATH entry', () => {
     expect(
-      findClaude('linux', { PATH: 'bin:/usr/bin' }, on('bin/claude', '/usr/bin/claude')),
+      findClaude('linux', { PATH: 'bin:/usr/bin' }, disk(['bin/claude', '/usr/bin/claude'])),
     ).toEqual({
       found: 'found',
       path: '/usr/bin/claude',
