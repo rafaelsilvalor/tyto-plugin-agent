@@ -10,6 +10,7 @@ import {
   lockDigest,
   parseLock,
 } from './install.js';
+import { useEnvironmentProxy } from './proxy.js';
 import {
   INSTALL_ARGUMENT,
   type LauncherLine,
@@ -57,6 +58,8 @@ async function download(url: string): Promise<Uint8Array> {
 }
 
 export async function main(argv: readonly string[]): Promise<void> {
+  // Behind a proxy, before the first request: the download and the adapter's own requests.
+  useEnvironmentProxy(process.env);
   const lockSource = readFileSync(new URL('./lock.json', import.meta.url), 'utf8');
   let lock: AdapterLock;
   try {
@@ -117,7 +120,9 @@ export async function main(argv: readonly string[]): Promise<void> {
   if (state.entry === null) notReady(`the adapter ${lock.adapter.version} is not downloaded yet`);
   const claude = findClaude(process.platform, process.env);
   if (claude.path === undefined)
-    notReady(`claude is ${claude.found === 'shim' ? 'only an npm shim' : 'not on PATH'}`);
+    notReady(
+      `claude is ${claude.found === 'shim' ? 'only an old npm shim running cli.js' : 'not on PATH'}`,
+    );
   process.env['CLAUDE_CODE_EXECUTABLE'] = claude.path;
   // The adapter reads `process.argv` as its own bin would: `node <file> <args…>`.
   process.argv = [process.argv[0] ?? 'node', state.entry, ...argv];

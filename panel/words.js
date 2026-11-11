@@ -97,7 +97,7 @@ const WORDS = {
         `The agent panel needs Tyto 0.18 or later, which gives a plugin's program a folder to download ${label}'s adapter into. Update Tyto.`,
       'no-claude': ({ label, found }) =>
         found === 'shim'
-          ? `${label} Code was found only as an npm shim (claude.cmd), which the adapter cannot start. Install ${label} Code natively, so that claude.exe is on your PATH, then press New.`
+          ? `${label} Code was found only as an old npm install (claude.cmd running cli.js), which the adapter cannot start. Update it with \`npm install -g @anthropic-ai/claude-code\`, or install ${label} Code natively, then press New.`
           : `${label} Code is not installed: the panel talks to your own \`claude\`, and it is not on your PATH. Install ${label} Code, then press New.`,
       'not-downloaded': ({ label, version, size, source }) =>
         `${label}'s adapter is not downloaded yet. **Download** fetches @agentclientprotocol/claude-agent-acp ${version} from ${source}, about ${size} MB on disk, into Tyto's folder for this plugin, and checks every file against the hash this plugin pins. It includes Anthropic's Claude Agent SDK, under Anthropic's own terms.`,
@@ -232,7 +232,7 @@ const WORDS = {
         `O painel do agente precisa do Tyto 0.18 ou mais novo, que dá ao programa de um plugin uma pasta para baixar o adaptador do ${label}. Atualize o Tyto.`,
       'no-claude': ({ label, found }) =>
         found === 'shim'
-          ? `O ${label} Code só foi encontrado como atalho do npm (claude.cmd), que o adaptador não consegue abrir. Instale o ${label} Code nativo, para que o claude.exe esteja no seu PATH, e clique em Nova.`
+          ? `O ${label} Code só foi encontrado numa instalação antiga do npm (claude.cmd que roda cli.js), que o adaptador não consegue abrir. Atualize com \`npm install -g @anthropic-ai/claude-code\`, ou instale o ${label} Code nativo, e clique em Nova.`
           : `O ${label} Code não está instalado: o painel conversa com o seu próprio \`claude\`, e ele não está no seu PATH. Instale o ${label} Code e clique em Nova.`,
       'not-downloaded': ({ label, version, size, source }) =>
         `O adaptador do ${label} ainda não foi baixado. **Baixar** busca o @agentclientprotocol/claude-agent-acp ${version} em ${source}, cerca de ${size} MB em disco, para a pasta do Tyto deste plugin, e confere cada arquivo com o hash que o plugin fixa. Ele inclui o Claude Agent SDK da Anthropic, sob os termos da própria Anthropic.`,

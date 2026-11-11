@@ -1,11 +1,21 @@
 // src/launcher/launch.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 import { pathToFileURL } from "url";
 
 // src/launcher/claude.ts
-import { statSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import { posix, win32 } from "path";
-function findClaude(platform, environment, isFile = (path) => statSync(path, { throwIfNoEntry: false })?.isFile() ?? false) {
+var nodeDisk = {
+  isFile: (path) => statSync(path, { throwIfNoEntry: false })?.isFile() ?? false,
+  readText: (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return void 0;
+    }
+  }
+};
+function findClaude(platform, environment, disk = nodeDisk) {
   const windows = platform === "win32";
   const path = windows ? win32 : posix;
   const search = Object.entries(environment).find(
@@ -16,20 +26,36 @@ function findClaude(platform, environment, isFile = (path) => statSync(path, { t
     if (folder === "" || !path.isAbsolute(folder)) continue;
     if (windows) {
       const binary = path.join(folder, "claude.exe");
-      if (isFile(binary)) return { found: "found", path: binary };
-      if (isFile(path.join(folder, "claude.cmd")) || isFile(path.join(folder, "claude")))
+      if (disk.isFile(binary)) return { found: "found", path: binary };
+      const command = path.join(folder, "claude.cmd");
+      if (disk.isFile(command)) {
+        const target = shimTarget(folder, disk.readText(command) ?? "", disk.isFile);
+        if (target !== void 0) return { found: "found", path: target };
         shim = true;
+      } else if (disk.isFile(path.join(folder, "claude"))) {
+        shim = true;
+      }
     } else {
       const binary = path.join(folder, "claude");
-      if (isFile(binary)) return { found: "found", path: binary };
+      if (disk.isFile(binary)) return { found: "found", path: binary };
     }
   }
   return { found: shim ? "shim" : "missing" };
 }
+var SHIM_PATH = /"%dp0%\\([^"%]+)"/giu;
+function shimTarget(folder, text2, isFile) {
+  const modules = win32.join(folder, "node_modules") + win32.sep;
+  for (const match of text2.matchAll(SHIM_PATH)) {
+    const path = win32.resolve(folder, match[1] ?? "");
+    if (!path.toLowerCase().startsWith(modules.toLowerCase())) continue;
+    if (path.toLowerCase().endsWith(".exe") && isFile(path)) return path;
+  }
+  return void 0;
+}
 
 // src/launcher/install.ts
 import { createHash, randomUUID } from "crypto";
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync as readFileSync2, readdirSync } from "fs";
 import { chmod, mkdir, readdir, rename, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { gunzipSync } from "zlib";
@@ -186,7 +212,7 @@ function installedState(lock, digest, dataFolder) {
   const folder = join(root, lock.adapter.version);
   let installed;
   try {
-    const marker = JSON.parse(readFileSync(join(folder, MARKER), "utf8"));
+    const marker = JSON.parse(readFileSync2(join(folder, MARKER), "utf8"));
     installed = marker.digest === digest && existsSync(join(folder, lock.entry));
   } catch {
     installed = false;
@@ -279,6 +305,17 @@ async function installOne(item, staging, io) {
   }
 }
 
+// src/launcher/proxy.ts
+import http from "http";
+var PROXY_VARIABLES = /* @__PURE__ */ new Set(["HTTPS_PROXY", "HTTP_PROXY"]);
+function useEnvironmentProxy(environment, setGlobal = http.setGlobalProxyFromEnv ?? null) {
+  const named = Object.entries(environment).some(
+    ([key, value]) => PROXY_VARIABLES.has(key.toUpperCase()) && value !== void 0 && value !== ""
+  );
+  if (!named || typeof setGlobal !== "function") return void 0;
+  return setGlobal(environment);
+}
+
 // src/launcher/protocol.ts
 var STATUS_ARGUMENT = "--tyto-status";
 var INSTALL_ARGUMENT = "--tyto-install";
@@ -309,7 +346,8 @@ async function download(url) {
   throw last instanceof Error ? last : new Error(String(last));
 }
 async function main(argv) {
-  const lockSource = readFileSync2(new URL("./lock.json", import.meta.url), "utf8");
+  useEnvironmentProxy(process.env);
+  const lockSource = readFileSync3(new URL("./lock.json", import.meta.url), "utf8");
   let lock;
   try {
     lock = parseLock(lockSource);
@@ -367,7 +405,9 @@ async function main(argv) {
   if (state.entry === null) notReady(`the adapter ${lock.adapter.version} is not downloaded yet`);
   const claude = findClaude(process.platform, process.env);
   if (claude.path === void 0)
-    notReady(`claude is ${claude.found === "shim" ? "only an npm shim" : "not on PATH"}`);
+    notReady(
+      `claude is ${claude.found === "shim" ? "only an old npm shim running cli.js" : "not on PATH"}`
+    );
   process.env["CLAUDE_CODE_EXECUTABLE"] = claude.path;
   process.argv = [process.argv[0] ?? "node", state.entry, ...argv];
   await import(pathToFileURL(state.entry).href);

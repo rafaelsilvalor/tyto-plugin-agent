@@ -11,7 +11,10 @@ export const STATUS_ARGUMENT = '--tyto-status';
 /** Installs the pinned adapter, answering `ProgressLine`s and one `InstalledLine` or `FailedLine`. */
 export const INSTALL_ARGUMENT = '--tyto-install';
 
-/** Where the person's `claude` stands: found, missing, or only an npm shim the SDK cannot run. */
+/**
+ * Where the person's `claude` stands: found, missing, or only an old npm shim that runs `cli.js`,
+ * which the adapter cannot start (TYTO-667).
+ */
 export type ClaudeFound = 'found' | 'missing' | 'shim';
 
 export interface StatusLine {
