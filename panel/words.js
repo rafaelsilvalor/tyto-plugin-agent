@@ -54,6 +54,9 @@ const WORDS = {
       cancelled: 'you stopped it',
       max_tokens: 'the reply got too long',
       refusal: 'the agent refused',
+      cap: "the month's cap was reached",
+      limit: 'too many calls to the model in one turn',
+      failed: 'the turn failed',
     },
     earlier: 'Earlier in this folder ↑',
     unreachable: (message) => `The panel could not reach the plugin: ${message}`,
@@ -63,12 +66,31 @@ const WORDS = {
       ended: ({ exit }) => `The agent ended (exit ${exit}). Your next message starts it again.`,
       'not-started': () => 'The agent did not start.',
       'turn-failed': ({ message }) => `The turn failed: ${message}`,
+      'cap-reached': ({ month, cap }) =>
+        `This month's spending (US$${month}) has reached the cap (US$${cap}). Raise agent.apiMonthlyCapUsd to go on.`,
+      'no-tools': ({ reason }) =>
+        reason === 'old-tyto'
+          ? 'This Tyto does not give plugins its tools; the agent answers without them.'
+          : `Tyto's tools are not available now (${reason}); the agent answers without them.`,
+      'agent-lines': ({ problems }) => `Lines of agent.apiAgents left out:\n${problems}`,
+      'max-tokens': () => 'The answer was cut at its length limit.',
+      refused: () => 'The model declined this request.',
+      'tool-loop': ({ limit }) => `The turn stopped after ${limit} calls to the model.`,
     },
     refusals: {
       busy: 'A turn is running; wait for it or stop it.',
       empty: 'The message is empty.',
     },
     problems: {
+      'no-key': () =>
+        'Enter your Claude API key to talk to the API agents. Tyto keeps it in its keychain; the panel never sees it again. Use is billed per token to the key, separately from any subscription.',
+      'bad-key': () => 'The Claude API refused the key. Enter another one.',
+      'no-api-agents': () =>
+        'No API agent is configured: every line of agent.apiAgents was left out.',
+      'api-old-tyto': ({ version }) =>
+        `The API agents need Tyto ${version} or later, which sends the key without the plugin holding it and keeps the month's spending. Update Tyto.`,
+      ledger: () =>
+        "The panel cannot read this month's spending, so it runs no turn until it can. Removing and installing the plugin again starts the record over.",
       'script-missing': ({ program }) =>
         `The agent plugin's own program, ${program}, is missing from its folder. Reinstall the plugin.`,
       'old-tyto': ({ label }) =>
@@ -99,6 +121,13 @@ const WORDS = {
           : `${label} has Tyto's tools configured, but they did not connect (status: ${status}), so it cannot see the brief in front or act on it. Press New to start again; if it happens again, Claude Code's MCP log for \`tyto\` says why.`,
     },
     download: 'Download',
+    keyLabel: 'Claude API key',
+    saveKey: 'Save the key',
+    keySaved: "Key saved in Tyto's keychain.",
+    keyNotSaved: (message) => `The key was not saved: ${message}`,
+    pickTitle: "This conversation's agent",
+    usage: (entry) =>
+      `${entry.model} · ${entry.inputTokens} in (${entry.cacheReadTokens} cached, ${entry.cacheWriteTokens} written) · ${entry.outputTokens} out · ~US$${entry.cost} · month US$${entry.month} of US$${entry.cap}`,
     downloaded: (label) => `${label}'s adapter is downloaded.`,
     logIn: (label) => `Log in to ${label}`,
     tryAgain: 'Try again',
@@ -159,6 +188,9 @@ const WORDS = {
       cancelled: 'você parou',
       max_tokens: 'a resposta ficou longa demais',
       refusal: 'o agente recusou',
+      cap: 'o teto do mês foi atingido',
+      limit: 'chamadas demais ao modelo numa resposta',
+      failed: 'a resposta falhou',
     },
     earlier: 'Antes, nesta pasta ↑',
     unreachable: (message) => `O painel não alcançou o plugin: ${message}`,
@@ -169,12 +201,31 @@ const WORDS = {
         `O agente encerrou (saída ${exit}). A sua próxima mensagem o inicia de novo.`,
       'not-started': () => 'O agente não iniciou.',
       'turn-failed': ({ message }) => `A resposta falhou: ${message}`,
+      'cap-reached': ({ month, cap }) =>
+        `O gasto deste mês (US$${month}) chegou ao teto (US$${cap}). Aumente agent.apiMonthlyCapUsd para continuar.`,
+      'no-tools': ({ reason }) =>
+        reason === 'old-tyto'
+          ? 'Este Tyto não dá ferramentas aos plugins; o agente responde sem elas.'
+          : `As ferramentas do Tyto não estão disponíveis agora (${reason}); o agente responde sem elas.`,
+      'agent-lines': ({ problems }) => `Linhas de agent.apiAgents deixadas de fora:\n${problems}`,
+      'max-tokens': () => 'A resposta foi cortada no limite de tamanho.',
+      refused: () => 'O modelo recusou este pedido.',
+      'tool-loop': ({ limit }) => `A resposta parou depois de ${limit} chamadas ao modelo.`,
     },
     refusals: {
       busy: 'Há uma resposta em andamento; espere ou pare.',
       empty: 'A mensagem está vazia.',
     },
     problems: {
+      'no-key': () =>
+        'Digite sua chave da API do Claude para conversar com os agentes da API. O Tyto a guarda no chaveiro; o painel não a vê de novo. O uso é cobrado por token na chave, à parte de qualquer assinatura.',
+      'bad-key': () => 'A API do Claude recusou a chave. Digite outra.',
+      'no-api-agents': () =>
+        'Nenhum agente da API está configurado: todas as linhas de agent.apiAgents ficaram de fora.',
+      'api-old-tyto': ({ version }) =>
+        `Os agentes da API precisam do Tyto ${version} ou mais novo, que envia a chave sem o plugin segurá-la e guarda o gasto do mês. Atualize o Tyto.`,
+      ledger: () =>
+        'O painel não consegue ler o gasto deste mês, então não roda nenhuma resposta até conseguir. Remover e instalar o plugin de novo recomeça o registro.',
       'script-missing': ({ program }) =>
         `O programa do próprio plugin do agente, ${program}, sumiu da pasta dele. Reinstale o plugin.`,
       'old-tyto': ({ label }) =>
@@ -205,6 +256,13 @@ const WORDS = {
           : `O ${label} tem as ferramentas do Tyto configuradas, mas elas não conectaram (status: ${status}), então ele não vê o brief da frente nem age nele. Clique em Nova para recomeçar; se acontecer de novo, o log MCP do Claude Code para \`tyto\` diz por quê.`,
     },
     download: 'Baixar',
+    keyLabel: 'Chave da API do Claude',
+    saveKey: 'Guardar a chave',
+    keySaved: 'Chave guardada no chaveiro do Tyto.',
+    keyNotSaved: (message) => `A chave não foi guardada: ${message}`,
+    pickTitle: 'Agente desta conversa',
+    usage: (entry) =>
+      `${entry.model} · ${entry.inputTokens} entrada (${entry.cacheReadTokens} do cache, ${entry.cacheWriteTokens} gravados) · ${entry.outputTokens} saída · ~US$${entry.cost} · mês US$${entry.month} de US$${entry.cap}`,
     downloaded: (label) => `O adaptador do ${label} foi baixado.`,
     logIn: (label) => `Entrar no ${label}`,
     tryAgain: 'Tentar de novo',

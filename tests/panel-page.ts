@@ -37,6 +37,8 @@ export interface PageScript {
    * kept; `open` then answers the last one too.
    */
   readonly afterDownload?: readonly Record<string, unknown>[];
+  /** The status `keySaved` answers, after the page stored a key (TYTO-661). */
+  readonly afterKey?: Record<string, unknown>;
 }
 
 function host(script: PageScript): string {
@@ -49,6 +51,8 @@ iframe{border:0;width:${String(script.width ?? 420)}px;height:${String(script.he
 <script>
 let status = ${JSON.stringify(script.status)};
 globalThis.calls = [];
+globalThis.requests = [];
+const afterKey = ${JSON.stringify(script.afterKey ?? null)};
 const history = ${JSON.stringify(script.history ?? [])};
 let entries = ${JSON.stringify(script.entries ?? [])};
 const login = ${JSON.stringify(script.login ?? { opened: true })};
@@ -70,11 +74,18 @@ const answers = {
   },
   send: (params) => { calls.push(['send', params.text]); status = { ...status, busy: true }; return { accepted: true }; },
   cancel: () => { calls.push(['cancel']); return status; },
+  keySaved: () => { calls.push(['keySaved']); if (afterKey) status = afterKey; return status; },
+  useAgent: (params) => { calls.push(['useAgent', params.name]); status = { ...status, agentName: params.name }; return status; },
 };
 window.addEventListener('message', (event) => {
   const m = event.data;
   if (!m || m.tyto !== 'panel' || m.type !== 'request') return;
-  const answer = answers[m.args[0]];
+  requests.push([m.capability, m.args]);
+  if (m.capability === 'storeCredential') {
+    event.source.postMessage({ tyto: 'panel', type: 'response', id: m.id, ok: true, value: null }, '*');
+    return;
+  }
+  const answer = m.capability === 'call' ? answers[m.args[0]] : undefined;
   event.source.postMessage(answer
     ? { tyto: 'panel', type: 'response', id: m.id, ok: true, value: answer(m.args[1] || {}) }
     : { tyto: 'panel', type: 'response', id: m.id, ok: false, message: 'unknown' }, '*');
@@ -124,4 +135,11 @@ export async function tell(frame: Frame, event: Record<string, unknown>): Promis
 /** What the page asked the plugin to do (`send`, `cancel`), in order. */
 export async function callsOf(frame: Frame): Promise<unknown[][]> {
   return frame.page().evaluate(() => (globalThis as unknown as { calls: unknown[][] }).calls);
+}
+
+/** Every request the page made of Tyto, `call` or another capability, with its arguments. */
+export async function requestsOf(frame: Frame): Promise<[string, unknown[]][]> {
+  return frame
+    .page()
+    .evaluate(() => (globalThis as unknown as { requests: [string, unknown[]][] }).requests);
 }

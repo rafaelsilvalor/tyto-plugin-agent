@@ -1,3 +1,499 @@
+// src/api/prices.ts
+var CACHE_WRITE_FACTOR = 1.25;
+var PRICES = {
+  "claude-fable-5-2": { label: "Claude Fable 5.2", input: 8, output: 40, cacheRead: 0.2 },
+  "claude-opus-5-5": { label: "Claude Opus 5.5", input: 4, output: 20, cacheRead: 0.2 },
+  "claude-opus-5": { label: "Claude Opus 5", input: 5, output: 25, cacheRead: 0.5 },
+  "claude-sonnet-5-5": { label: "Claude Sonnet 5.5", input: 2, output: 10, cacheRead: 0.1 },
+  "claude-sonnet-5": { label: "Claude Sonnet 5", input: 2, output: 10, cacheRead: 0.2 },
+  "claude-haiku-5-5": {
+    label: "Claude Haiku 5.5",
+    input: 0.1,
+    output: 0.5,
+    cacheRead: 0.01,
+    longAbove: 1e5,
+    long: { input: 0.5, output: 2.5, cacheRead: 0.05 }
+  }
+};
+function costMicros(model, usage) {
+  const price = PRICES[model];
+  if (price === void 0) return void 0;
+  const read = usage.cache_read_input_tokens ?? 0;
+  const written = usage.cache_creation_input_tokens ?? 0;
+  const prompt = usage.input_tokens + read + written;
+  const rates = price.longAbove !== void 0 && prompt > price.longAbove ? price.long : price;
+  const micros = usage.input_tokens * rates.input + written * rates.input * CACHE_WRITE_FACTOR + read * rates.cacheRead + usage.output_tokens * rates.output;
+  return Math.ceil(micros);
+}
+function dollars(micros) {
+  const value = micros / 1e6;
+  return value < 0.01 ? value.toFixed(4) : value.toFixed(2);
+}
+
+// src/api/agents.ts
+var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+var DEFAULT_AGENT_LINES = [
+  "Modelador | claude-haiku-5-5 | low | list_templates,describe_template,check_brief,brief_in_front,selection,propose_edit,proposal_status,write_brief | You write and fix briefs for Tyto, a compiler that renders briefs into images. Read the template with describe_template before writing for it, check every brief with check_brief, and change the brief in front only with propose_edit, which the person accepts or rejects. Answer in the language the person writes in.",
+  "Revisor | claude-opus-5-5 | medium | check_brief,describe_template,brief_in_front,render_preview,propose_edit,proposal_status | You review briefs for Tyto. Run check_brief on the brief in front, look at render_preview when the layout matters, and propose the smallest edits that fix what you find, with propose_edit. Say what you checked and what you changed. Answer in the language the person writes in."
+];
+function agentOf(line) {
+  const parts = line.split("|");
+  if (parts.length < 5) {
+    return {
+      problem: `"${line.slice(0, 40)}" is not Name | model | effort | tools | instructions`
+    };
+  }
+  const [name, model, effort, tools] = parts.slice(0, 4).map((part) => part.trim());
+  const instructions = parts.slice(4).join("|").trim();
+  if (name === "") return { problem: "an agent has no name" };
+  if (PRICES[model] === void 0) {
+    return { problem: `${name}: the panel has no price for ${model}, so it cannot keep the cap` };
+  }
+  if (!EFFORTS.includes(effort)) {
+    return { problem: `${name}: effort ${effort} is not one of ${EFFORTS.join(", ")}` };
+  }
+  if (instructions === "") return { problem: `${name}: no instructions` };
+  const allowed = tools === "*" ? "*" : tools === "-" || tools === "" ? [] : tools.split(",").map((tool) => tool.trim()).filter((tool) => tool !== "");
+  return { agent: { name, model, effort, tools: allowed, instructions } };
+}
+function agentsOf(lines) {
+  const agents = [];
+  const problems = [];
+  for (const line of lines) {
+    const read = agentOf(line);
+    if ("problem" in read) problems.push(read.problem);
+    else if (agents.some((agent) => agent.name === read.agent.name)) {
+      problems.push(`${read.agent.name}: a second agent with this name is left out`);
+    } else agents.push(read.agent);
+  }
+  return { agents, problems };
+}
+
+// src/api/client.ts
+var API_KEY_CREDENTIAL = "anthropic-api-key";
+var PLACEHOLDER = "set-by-tyto-host";
+var NO_BODY = /* @__PURE__ */ new Set([101, 204, 205, 304]);
+function apiFetch(fetch) {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const headers = {};
+    request.headers.forEach((value, name) => {
+      headers[name] = value;
+    });
+    delete headers["x-api-key"];
+    delete headers["authorization"];
+    const body = init?.body === void 0 || init.body === null ? void 0 : await request.text();
+    const answer = await fetch(request.url, {
+      method: request.method,
+      headers,
+      ...body === void 0 ? {} : { body },
+      credentialHeaders: { "x-api-key": API_KEY_CREDENTIAL }
+    });
+    return new Response(NO_BODY.has(answer.status) ? null : answer.body, {
+      status: answer.status,
+      statusText: answer.statusText,
+      headers: answer.headers
+    });
+  };
+}
+async function apiClient(fetch) {
+  const { Anthropic: Client } = await import("./vendor/anthropic-sdk.js");
+  return new Client({
+    apiKey: PLACEHOLDER,
+    fetch: apiFetch(fetch),
+    // The host answers whole: a retry is the SDK's, on a 429 or a 5xx, at most twice.
+    maxRetries: 2
+  });
+}
+
+// src/api/ledger.ts
+function monthOf(now) {
+  return now.toISOString().slice(0, 7);
+}
+function ledgerKey(month) {
+  return `spend.${month}`;
+}
+async function spentIn(records, month) {
+  const stored = await records.get(ledgerKey(month));
+  if (stored === void 0) return 0;
+  const micros = stored?.micros;
+  if (typeof micros !== "number" || !Number.isFinite(micros) || micros < 0) {
+    throw new Error(`the spend record for ${month} is not one this panel wrote`);
+  }
+  return micros;
+}
+async function addSpent(records, month, micros) {
+  const total = await spentIn(records, month) + micros;
+  await records.set(ledgerKey(month), { micros: total });
+  return total;
+}
+
+// src/api/conversation.ts
+var TURN_CALL_LIMIT = 24;
+var MAX_TOKENS = 16e3;
+var READ_LIMIT = 200;
+var TOOL_TEXT_LIMIT = 5e4;
+function codeIn(cause) {
+  for (let at = cause, depth = 0; at !== void 0 && at !== null && depth < 5; depth += 1) {
+    const code = at.code;
+    if (typeof code === "string" && code.startsWith("E_")) return code;
+    at = at.cause;
+  }
+  return void 0;
+}
+function messageOf(cause) {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+function keyProblem(kind) {
+  return {
+    kind,
+    message: kind === "no-key" ? "Enter your Claude API key to talk to the API agents. Tyto keeps it in its keychain; the panel never sees it again." : "The Claude API refused the key. Enter another one.",
+    steps: [],
+    params: {},
+    canEnterKey: true
+  };
+}
+var OLD_TYTO = {
+  kind: "api-old-tyto",
+  message: "The API agents need Tyto 0.20 or later, which sends the key without the plugin holding it and keeps the month\u2019s spending. Update Tyto.",
+  steps: [],
+  params: { version: "0.20" }
+};
+function toolsFor(agent, offered) {
+  const allowed = offered.filter((tool) => agent.tools === "*" || agent.tools.includes(tool.name)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return allowed.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: { type: "object", ...tool.inputSchema }
+  }));
+}
+function resultBlocks(content) {
+  return content.map(
+    (block) => block.type === "text" ? { type: "text", text: block.text.slice(0, TOOL_TEXT_LIMIT) } : {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: block.mimeType,
+        data: block.data
+      }
+    }
+  );
+}
+function apiConversation(host, options) {
+  const now = options.now ?? (() => /* @__PURE__ */ new Date());
+  const makeClient = options.client ?? apiClient;
+  const entries = [];
+  let seq = 0;
+  let busy = false;
+  let cancelled = false;
+  let problem = null;
+  let chosen;
+  let client;
+  let messages = [];
+  let saidLines = "";
+  const push = (entry) => {
+    seq += 1;
+    entries.push({ ...entry, seq });
+  };
+  const agents = () => {
+    const read = agentsOf(options.settings().agentLines);
+    const said = read.problems.join("\n");
+    if (said !== "" && said !== saidLines) {
+      push({ kind: "notice", code: "agent-lines", params: { problems: said }, text: said });
+    }
+    saidLines = said;
+    return read.agents;
+  };
+  const agent = () => {
+    const all = agents();
+    return all.find((candidate) => candidate.name === chosen) ?? all[0];
+  };
+  const supported = () => typeof host.storage?.get === "function" && typeof host.storage.set === "function";
+  const windowTools = () => {
+    const window = host.window;
+    return typeof window.tools === "function" && typeof window.callTool === "function" ? window : void 0;
+  };
+  const status = () => {
+    const current = agent();
+    return {
+      agent: current === void 0 ? "Claude API" : `${current.name} \xB7 ${PRICES[current.model]?.label ?? current.model}`,
+      running: true,
+      busy,
+      window: windowTools() === void 0 ? "unavailable" : "connected",
+      problem,
+      folder: null,
+      agents: agents().map((each) => ({ name: each.name, model: each.model })),
+      ...current === void 0 ? {} : { agentName: current.name }
+    };
+  };
+  const capMicros = () => Math.max(0, Math.round(options.settings().monthlyCapUsd * 1e6));
+  async function offeredTools(current) {
+    const window = windowTools();
+    if (window === void 0) {
+      push({
+        kind: "notice",
+        code: "no-tools",
+        params: { reason: "old-tyto" },
+        text: "This Tyto does not give plugins its tools; the agent answers without them."
+      });
+      return [];
+    }
+    try {
+      return toolsFor(current, await window.tools());
+    } catch (cause) {
+      const code = codeIn(cause) ?? "failed";
+      push({
+        kind: "notice",
+        code: "no-tools",
+        params: { reason: code },
+        text: `Tyto's tools are not available now (${code}); the agent answers without them.`
+      });
+      return [];
+    }
+  }
+  async function runTools(blocks) {
+    const window = windowTools();
+    const results = [];
+    for (const block of blocks) {
+      if (block.type !== "tool_use") continue;
+      push({
+        kind: "tool",
+        id: block.id,
+        title: block.name,
+        status: "in_progress",
+        tyto: block.name
+      });
+      try {
+        if (window === void 0) throw new Error("this Tyto gives plugins no tools");
+        const answer = await window.callTool(
+          block.name,
+          block.input ?? {}
+        );
+        results.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: resultBlocks(answer.content),
+          ...answer.isError ? { is_error: true } : {}
+        });
+        push({
+          kind: "tool",
+          id: block.id,
+          title: block.name,
+          status: answer.isError ? "failed" : "completed",
+          tyto: block.name
+        });
+      } catch (cause) {
+        results.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: [
+            { type: "text", text: `Tyto refused the call: ${codeIn(cause) ?? messageOf(cause)}` }
+          ],
+          is_error: true
+        });
+        push({ kind: "tool", id: block.id, title: block.name, status: "failed", tyto: block.name });
+      }
+    }
+    return results;
+  }
+  async function turn(text) {
+    const storage = host.storage;
+    const month = monthOf(now());
+    const cap = capMicros();
+    try {
+      const current = agent();
+      if (current === void 0) {
+        problem = {
+          kind: "no-api-agents",
+          message: "No API agent is configured: every line of agent.apiAgents was left out.",
+          steps: [],
+          params: {}
+        };
+        return;
+      }
+      let spent = await spentIn(storage, month);
+      if (spent >= cap) {
+        push({
+          kind: "notice",
+          code: "cap-reached",
+          params: { month: dollars(spent), cap: dollars(cap) },
+          text: `This month's spending (US$${dollars(spent)}) has reached the cap (US$${dollars(cap)}). Raise agent.apiMonthlyCapUsd to go on.`
+        });
+        push({ kind: "end", reason: "cap" });
+        return;
+      }
+      client ??= await makeClient(host.fetch);
+      const tools = await offeredTools(current);
+      messages.push({ role: "user", content: text });
+      for (let call = 0; ; call += 1) {
+        if (call >= TURN_CALL_LIMIT) {
+          push({
+            kind: "notice",
+            code: "tool-loop",
+            params: { limit: String(TURN_CALL_LIMIT) },
+            text: `The turn stopped after ${String(TURN_CALL_LIMIT)} calls to the model.`
+          });
+          push({ kind: "end", reason: "limit" });
+          return;
+        }
+        const response = await client.messages.create({
+          model: current.model,
+          max_tokens: MAX_TOKENS,
+          // The stable prefix, cached: the tools come first, then these instructions.
+          system: [
+            { type: "text", text: current.instructions, cache_control: { type: "ephemeral" } }
+          ],
+          ...tools.length === 0 ? {} : { tools },
+          // And the conversation so far, up to its last block (automatic placement).
+          cache_control: { type: "ephemeral" },
+          output_config: { effort: current.effort },
+          messages
+        });
+        const micros = costMicros(current.model, response.usage) ?? 0;
+        spent = await addSpent(storage, month, micros);
+        push({
+          kind: "usage",
+          model: response.model,
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+          cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+          cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
+          cost: dollars(micros),
+          month: dollars(spent),
+          cap: dollars(cap)
+        });
+        for (const block of response.content) {
+          if (block.type === "text" && block.text !== "") push({ kind: "text", text: block.text });
+        }
+        messages.push({ role: "assistant", content: response.content });
+        if (response.stop_reason === "refusal") {
+          push({
+            kind: "notice",
+            code: "refused",
+            text: "The model declined this request."
+          });
+          push({ kind: "end", reason: "refusal" });
+          return;
+        }
+        if (response.stop_reason === "max_tokens") {
+          push({
+            kind: "notice",
+            code: "max-tokens",
+            text: "The answer was cut at its length limit."
+          });
+        }
+        if (response.stop_reason !== "tool_use" && response.stop_reason !== "pause_turn") {
+          push({ kind: "end", reason: response.stop_reason ?? "end_turn" });
+          return;
+        }
+        if (cancelled || spent >= cap) {
+          messages.pop();
+          if (spent >= cap && !cancelled) {
+            push({
+              kind: "notice",
+              code: "cap-reached",
+              params: { month: dollars(spent), cap: dollars(cap) },
+              text: `This month's spending (US$${dollars(spent)}) has reached the cap (US$${dollars(cap)}).`
+            });
+          }
+          push({ kind: "end", reason: cancelled ? "cancelled" : "cap" });
+          return;
+        }
+        if (response.stop_reason === "tool_use") {
+          messages.push({ role: "user", content: await runTools(response.content) });
+        }
+      }
+    } catch (cause) {
+      const code = codeIn(cause);
+      const statusCode = cause?.status;
+      if (code === "E_CREDENTIAL_MISSING") problem = keyProblem("no-key");
+      else if (statusCode === 401) problem = keyProblem("bad-key");
+      else if (code === "E_PLUGIN_STORAGE" || /spend record/u.test(messageOf(cause))) {
+        problem = {
+          kind: "ledger",
+          message: "The panel cannot read this month\u2019s spending, so it runs no turn until it can. Removing and installing the plugin again starts the record over.",
+          steps: [],
+          params: {}
+        };
+      } else {
+        const said = messageOf(cause);
+        push({
+          kind: "notice",
+          code: "turn-failed",
+          params: { message: said },
+          text: `The turn failed: ${said}`
+        });
+      }
+      while (messages.length > 0 && messages.at(-1)?.role === "user") messages.pop();
+      push({ kind: "end", reason: "failed" });
+    } finally {
+      busy = false;
+      cancelled = false;
+    }
+  }
+  return {
+    open() {
+      if (!supported()) problem = OLD_TYTO;
+      return Promise.resolve({ ...status(), history: [] });
+    },
+    send(text) {
+      if (busy) {
+        return {
+          accepted: false,
+          code: "busy",
+          reason: "A turn is running; wait for it or stop it."
+        };
+      }
+      if (text.trim() === "")
+        return { accepted: false, code: "empty", reason: "The message is empty." };
+      if (!supported()) {
+        problem = OLD_TYTO;
+        return { accepted: false, reason: OLD_TYTO.message };
+      }
+      if (problem?.kind === "no-key" || problem?.kind === "bad-key") {
+        return { accepted: false, reason: problem.message };
+      }
+      busy = true;
+      problem = null;
+      push({ kind: "user", text });
+      void turn(text);
+      return { accepted: true };
+    },
+    read(after) {
+      return {
+        entries: entries.filter((entry) => entry.seq > after).slice(0, READ_LIMIT),
+        status: status()
+      };
+    },
+    answer: () => ({ answered: false }),
+    cancel() {
+      if (busy) cancelled = true;
+      return Promise.resolve();
+    },
+    reset() {
+      entries.length = 0;
+      messages = [];
+      problem = supported() ? null : OLD_TYTO;
+      saidLines = "";
+      return Promise.resolve();
+    },
+    download: () => ({ started: false, code: "running" }),
+    login: () => Promise.resolve({ opened: false, code: "no-method" }),
+    status,
+    useAgent(name) {
+      if (!busy && agents().some((each) => each.name === name) && name !== chosen) {
+        chosen = name;
+        messages = [];
+      }
+      return status();
+    },
+    keySaved() {
+      if (problem?.kind === "no-key" || problem?.kind === "bad-key") problem = null;
+      return status();
+    }
+  };
+}
+
 // src/acp/connection.ts
 var RpcError = class extends Error {
   code;
@@ -206,13 +702,33 @@ var DRIVERS = [
     authReport: CLAUDE_AUTH_REPORT
   }
 ];
+var API_DRIVER = "claude-api";
+var DEFAULT_MONTHLY_CAP_USD = 10;
 var SETTINGS = [
   {
     id: "agent",
-    form: { type: "string", enum: DRIVERS.map((driver) => driver.id) },
+    form: { type: "string", enum: [...DRIVERS.map((driver) => driver.id), API_DRIVER] },
     default: "claude",
     description: "Which agent the panel talks to.",
-    options: DRIVERS.map((driver) => ({ value: driver.id, description: driver.label }))
+    options: [
+      ...DRIVERS.map((driver) => ({ value: driver.id, description: driver.label })),
+      {
+        value: API_DRIVER,
+        description: "Claude API agents, with your own API key: billed per token to the key, separately from any subscription."
+      }
+    ]
+  },
+  {
+    id: "apiAgents",
+    form: { type: "array", items: { type: "string", minLength: 1 } },
+    default: [...DEFAULT_AGENT_LINES],
+    description: "The Claude API agents, one per line: Name | model | effort | tools | instructions. Effort is low, medium, high, xhigh or max; tools is a comma-separated list of Tyto tools, * for all, or - for none."
+  },
+  {
+    id: "apiMonthlyCapUsd",
+    form: { type: "number", minimum: 0 },
+    default: DEFAULT_MONTHLY_CAP_USD,
+    description: "The most the Claude API agents may spend in a calendar month (UTC), in US dollars, as estimated from each call\u2019s tokens. At the cap the panel starts no new turn."
   },
   {
     id: "args",
@@ -224,6 +740,16 @@ var SETTINGS = [
 var RAW_RECORD = {
   safeParse: (value) => ({ success: true, data: value })
 };
+function usesApi(host) {
+  const raw = host.config(RAW_RECORD);
+  return raw?.agent === API_DRIVER;
+}
+function apiSettings(host) {
+  const raw = host.config(RAW_RECORD);
+  const lines = Array.isArray(raw?.apiAgents) ? raw.apiAgents.filter((line) => typeof line === "string") : [...DEFAULT_AGENT_LINES];
+  const cap = typeof raw?.apiMonthlyCapUsd === "number" && Number.isFinite(raw.apiMonthlyCapUsd) ? Math.max(0, raw.apiMonthlyCapUsd) : DEFAULT_MONTHLY_CAP_USD;
+  return { agentLines: lines, monthlyCapUsd: cap };
+}
 function chosenAgent(host) {
   const raw = host.config(RAW_RECORD);
   const driver = DRIVERS.find((candidate) => candidate.id === raw?.agent) ?? DRIVERS[0];
@@ -274,14 +800,14 @@ function loginMethodOf(initialized, preferred) {
   }));
   return usable.find((method) => method.id === preferred) ?? usable[0];
 }
-var READ_LIMIT = 200;
+var READ_LIMIT2 = 200;
 var PROTOCOL_VERSION = 1;
 var CLIENT_INFO = { name: "tyto-plugin-agent", version: "0.1.0" };
 function codeOf(cause) {
   const code = cause?.code;
   return typeof code === "string" ? code : void 0;
 }
-function messageOf(cause) {
+function messageOf2(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 function startProblem(choice, cause) {
@@ -310,7 +836,7 @@ function startProblem(choice, cause) {
         steps: []
       };
     default:
-      return { kind: "failed", message: messageOf(cause), steps: [] };
+      return { kind: "failed", message: messageOf2(cause), steps: [] };
   }
 }
 function loginProblem(choice, method) {
@@ -671,7 +1197,7 @@ function conversation(host) {
       messages = [...await loadHistory(host, program.cwd).catch(() => [])];
       return { program, connection, sessionId: created.sessionId, choice };
     } catch (cause) {
-      problem = cause instanceof RpcError && cause.code === AUTH_REQUIRED ? loginProblem(choice, loginMethod) : { kind: "failed", message: messageOf(cause), steps: [] };
+      problem = cause instanceof RpcError && cause.code === AUTH_REQUIRED ? loginProblem(choice, loginMethod) : { kind: "failed", message: messageOf2(cause), steps: [] };
       await program.kill();
       return void 0;
     }
@@ -702,7 +1228,7 @@ function conversation(host) {
       if (cause instanceof RpcError && cause.code === AUTH_REQUIRED) {
         problem = loginProblem(chosenAgent(host), loginMethod);
       } else {
-        const said = messageOf(cause);
+        const said = messageOf2(cause);
         push({
           kind: "notice",
           code: "turn-failed",
@@ -715,7 +1241,7 @@ function conversation(host) {
       if (folder !== null && reply !== "") {
         messages.push({ role: "user", text }, { role: "agent", text: reply });
         await saveHistory(host, folder, messages).catch(
-          (cause) => host.log.warn(`the conversation was not saved: ${messageOf(cause)}`)
+          (cause) => host.log.warn(`the conversation was not saved: ${messageOf2(cause)}`)
         );
       }
     }
@@ -747,7 +1273,7 @@ function conversation(host) {
       return { accepted: true };
     },
     read(after) {
-      const next = entries.filter((entry) => entry.seq > after).slice(0, READ_LIMIT);
+      const next = entries.filter((entry) => entry.seq > after).slice(0, READ_LIMIT2);
       return { entries: next, status: status() };
     },
     answer(permission, optionId) {
@@ -792,7 +1318,7 @@ function conversation(host) {
           case "E_TERMINAL_UNAVAILABLE":
             return { opened: false, code: "no-terminal" };
           default:
-            return { opened: false, code: "failed", reason: messageOf(cause) };
+            return { opened: false, code: "failed", reason: messageOf2(cause) };
         }
       }
     },
@@ -809,7 +1335,9 @@ function stringOf(value) {
   return typeof value === "string" ? value : "";
 }
 function activate(host) {
-  const chat = conversation(host);
+  const acp = conversation(host);
+  const api = apiConversation(host, { settings: () => apiSettings(host) });
+  const pick = () => usesApi(host) ? api : acp;
   const registered = [
     ...SETTINGS.map((setting) => host.registerConfiguration(setting)),
     host.registerPanel({
@@ -819,30 +1347,36 @@ function activate(host) {
       entry: "panel/index.html",
       async call({ method, params }) {
         const given = params ?? {};
+        const chat = pick;
         switch (method) {
           case "open":
-            return ok(await chat.open());
+            return ok(await chat().open());
           case "send":
-            return ok(chat.send(stringOf(given["text"])));
+            return ok(chat().send(stringOf(given["text"])));
           case "read":
-            return ok(chat.read(numberOf(given["after"])));
+            return ok(chat().read(numberOf(given["after"])));
           case "answer":
             return ok(
-              chat.answer(
+              chat().answer(
                 stringOf(given["id"]),
                 typeof given["optionId"] === "string" ? given["optionId"] : null
               )
             );
           case "cancel":
-            await chat.cancel();
-            return ok(chat.status());
+            await chat().cancel();
+            return ok(chat().status());
           case "reset":
-            await chat.reset();
-            return ok(chat.status());
+            await chat().reset();
+            return ok(chat().status());
           case "login":
-            return ok(await chat.login());
+            return ok(await chat().login());
           case "download":
-            return ok(chat.download());
+            return ok(chat().download());
+          // The API driver's own: the page's agent picker, and a key the page just stored.
+          case "useAgent":
+            return ok(usesApi(host) ? api.useAgent(stringOf(given["name"])) : acp.status());
+          case "keySaved":
+            return ok(usesApi(host) ? api.keySaved() : acp.status());
           default:
             return ok({ unknown: method });
         }
@@ -851,7 +1385,8 @@ function activate(host) {
   ];
   return {
     dispose() {
-      void chat.reset();
+      void acp.reset();
+      void api.reset();
       for (const registration of registered) registration.dispose();
     }
   };

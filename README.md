@@ -8,9 +8,46 @@ arrive as proposals you approve or reject. This repository is public and unlicen
 Tyto knows no provider (Tyto ADR 0011, ADR 0127): everything agent-specific lives here, in its
 own repository, and reaches Tyto only through the plugin API.
 
-**0.1.0 talks to Claude only**, through Claude Code's ACP adapter. Other agents that speak ACP
-(Codex through `codex-acp`, Gemini CLI through `gemini --acp`) are one row each in
-`src/drivers.ts` and one more program to approve; they are not shipped or tested yet.
+**0.1.0 talks to Claude only**, two ways: through Claude Code's ACP adapter, with your
+subscription, or through the Claude API with your own API key and agents you configure (below).
+Other agents that speak ACP (Codex through `codex-acp`, Gemini CLI through `gemini --acp`) are
+one row each in `src/drivers.ts` and one more program to approve; they are not shipped or tested
+yet.
+
+## The API agents: your key, your agents, a monthly cap
+
+Set `agent.agent` to `"claude-api"` and the panel talks to the Claude API directly, with **your
+own API key**: the route Anthropic's terms name for products built on Claude. No program runs,
+no MCP server is involved (so an organisation's MCP allowlist for Claude Code does not apply),
+and the agent gets Tyto's tools and nothing else. It needs Tyto 0.20 or later.
+
+- **The key stays in Tyto's keychain.** The panel asks for it once; the page stores it straight
+  into Tyto's keychain (`credentials:anthropic-api-key`, Tyto ADR 0134) and empties the field.
+  The plugin never holds it: each request asks Tyto to add it to the `x-api-key` header, and Tyto
+  does so only for `api.anthropic.com` (Tyto ADR 0191). It is never in `settings.json`, a process
+  environment, a log or the screen.
+- **Usage is billed per token to the key's owner**, separately from any Claude subscription.
+- **Agents are configuration**: each line of `agent.apiAgents` is
+  `Name | model | effort | tools | instructions`. The panel shows a picker when there are two or
+  more; switching starts a fresh conversation. It ships two to start from: _Modelador_ on Claude
+  Haiku 5.5, which writes briefs, and _Revisor_ on Claude Opus 5.5, which checks them.
+- **Tools are the window's, in process** (`host.window.tools()` and `callTool()`, Tyto ADR 0190),
+  under the same trust as an agent connected to the window; an edit is a proposal you accept or
+  reject. An agent gets only the tools its line names.
+- **Each call shows its tokens and an estimated cost**, from the price table in
+  `src/api/prices.ts`, dated (read on 2026-11-03) and pointing at
+  <https://platform.claude.com/docs/en/about-claude/pricing>. Anthropic's invoice is the bill.
+- **A monthly cap**, `agent.apiMonthlyCapUsd` (US$10 unless you set it), counted in UTC months in
+  Tyto's durable plugin records (Tyto ADR 0191). A turn stops before the next call once the month
+  reaches it, and no new turn starts. Removing the plugin deletes the record, and with it the
+  month's count.
+- **Prompt caching** on the stable start of every request (the agent's tools and instructions)
+  and on the conversation so far; the cost line shows `cached` and `written` tokens, from the
+  API's `usage.cache_read_input_tokens` and `usage.cache_creation_input_tokens`.
+- **Anthropic's TypeScript SDK** (`@anthropic-ai/sdk` 1.7.0, Apache-2.0) is bundled, minified,
+  as `dist/vendor/anthropic-sdk.js`, with its licence beside it
+  (`dist/vendor/anthropic-sdk.LICENSE.txt`, and the MIT notice for earlier versions in
+  `anthropic-sdk.LICENSE-MIT.txt`). The panel loads it only when the API driver runs.
 
 ## Your login, your plan
 
@@ -73,9 +110,12 @@ approval.
 
 ### What it may reach
 
-| Permission                 | Why                                                                                                                                                                                                                        |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `process:claude-agent-acp` | Run the plugin's own launcher (`adapter/launch.mjs`) on Tyto's Node, in the folder open in Tyto: it downloads the adapter when you accept, then runs it and talks to it on stdio; open a Terminal tab running its sign-in. |
+| Permission                      | Why                                                                                                                                                                                                                        |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `process:claude-agent-acp`      | Run the plugin's own launcher (`adapter/launch.mjs`) on Tyto's Node, in the folder open in Tyto: it downloads the adapter when you accept, then runs it and talks to it on stdio; open a Terminal tab running its sign-in. |
+| `net:api.anthropic.com`         | The API agents' requests to the Claude API, through Tyto's network.                                                                                                                                                        |
+| `credentials:anthropic-api-key` | Your API key, which the panel stores in Tyto's keychain and Tyto adds to each request to `api.anthropic.com`; the plugin never reads it.                                                                                   |
+| `window:tools`                  | The API agents use Tyto's tools in the open window: read what is open there and propose edits you accept or reject, while Tyto lets agents connect (`agentsListen`).                                                       |
 
 The launcher is this plugin's own code, so the install box says it is not confined: its own
 downloads reach only `registry.npmjs.org`, for the files the lock pins, and it writes them only
@@ -147,10 +187,12 @@ operating system's, not Tyto's setting.
 
 In `settings.json`:
 
-| Setting       | Default    | Meaning                                                                           |
-| ------------- | ---------- | --------------------------------------------------------------------------------- |
-| `agent.agent` | `"claude"` | Which agent the panel talks to. Only `claude` in 0.1.0.                           |
-| `agent.args`  | `[]`       | Extra arguments for the adapter. Tyto refuses one holding `" % ^ & \| < > ( ) !`. |
+| Setting                  | Default    | Meaning                                                                                                                                                                                                                                                                        |
+| ------------------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `agent.agent`            | `"claude"` | Which agent the panel talks to: `claude` (Claude Code, your subscription) or `claude-api` (your API key).                                                                                                                                                                      |
+| `agent.args`             | `[]`       | Extra arguments for the adapter. Tyto refuses one holding `" % ^ & \| < > ( ) !`.                                                                                                                                                                                              |
+| `agent.apiAgents`        | two agents | The API agents, one per line: `Name \| model \| effort \| tools \| instructions`. Effort is `low`, `medium`, `high`, `xhigh` or `max`; tools is a comma-separated list, `*` for all, `-` for none. A line on a model the price table lacks is left out, and the panel says so. |
+| `agent.apiMonthlyCapUsd` | `10`       | The most the API agents may spend in a calendar month (UTC), in US dollars, as estimated.                                                                                                                                                                                      |
 
 ## How it works
 

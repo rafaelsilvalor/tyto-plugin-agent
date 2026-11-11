@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "engine": ">=0.18",
   "contributes": ["panel", "configuration"],
-  "permissions": ["process:claude-agent-acp"],
+  "permissions": [
+    "process:claude-agent-acp",
+    "net:api.anthropic.com",
+    "credentials:anthropic-api-key",
+    "window:tools"
+  ],
   "programs": { "claude-agent-acp": "adapter/launch.mjs" }
 }

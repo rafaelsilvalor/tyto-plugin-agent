@@ -33,23 +33,29 @@ window.addEventListener('message', (event) => {
   else waiting.reject(new Error(message.message || message.code || 'refused'));
 });
 
-/** Asks the plugin's process; resolves with its answer's value. */
-function call(method, params) {
+/** Asks Tyto for a capability on this panel's behalf (Tyto ADR 0045, 0134, 0173). */
+function request(capability, args) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    window.parent.postMessage(
-      { tyto: 'panel', type: 'request', id, capability: 'call', args: [method, params ?? {}] },
-      '*',
-    );
+    window.parent.postMessage({ tyto: 'panel', type: 'request', id, capability, args }, '*');
   });
 }
+
+/** Asks the plugin's process; resolves with its answer's value. */
+function call(method, params) {
+  return request('call', [method, params ?? {}]);
+}
+
+/** The API key's credential, as the manifest declares it (`credentials:anthropic-api-key`). */
+const API_KEY = 'anthropic-api-key';
 
 const log = document.getElementById('log');
 const input = document.getElementById('input');
 const sendButton = document.getElementById('send');
 const stopButton = document.getElementById('stop');
 const agentName = document.getElementById('agent');
+const pick = document.getElementById('pick');
 const resetButton = document.getElementById('reset');
 const context = document.getElementById('context');
 const working = document.getElementById('working');
@@ -268,9 +274,38 @@ function showWords() {
   if (shownProblem !== null) showProblem(lastStatus?.problem ?? null, true);
 }
 
+/** The API driver's agents, as a picker; hidden for an agent program, which is one agent. */
+function showAgents(status) {
+  const agents = Array.isArray(status.agents) ? status.agents : [];
+  pick.hidden = agents.length < 2;
+  pick.title = say().pickTitle;
+  const names = agents.map((agent) => agent.name).join('\n');
+  if (pick.dataset.names !== names) {
+    pick.dataset.names = names;
+    pick.replaceChildren(
+      ...agents.map((agent) => {
+        const option = element('option', '', `${agent.name} · ${agent.model}`);
+        option.value = agent.name;
+        return option;
+      }),
+    );
+  }
+  if (status.agentName !== undefined) pick.value = status.agentName;
+  pick.disabled = status.busy;
+}
+
+pick.addEventListener('change', async () => {
+  try {
+    showStatus(await call('useAgent', { name: pick.value }));
+  } catch (cause) {
+    append(element('div', 'notice', say().unreachable(cause.message)));
+  }
+});
+
 function showStatus(status) {
   lastStatus = status;
   agentName.textContent = status.agent;
+  showAgents(status);
   busy = status.busy;
   if (!busy) {
     stopping = false;
@@ -387,6 +422,7 @@ function showProblem(problem, again = false) {
     choices.append(login, retry);
     box.appendChild(choices);
   }
+  if (problem.canEnterKey === true) box.appendChild(keyForm());
   if (problem.kind === 'not-downloaded' && problem.canDownload === true) {
     const choices = element('div', 'choices');
     const download = element('button', 'primary', say().download);
@@ -401,6 +437,47 @@ function showProblem(problem, again = false) {
   if (inPlace && problemBox !== null && problemBox.isConnected) problemBox.replaceWith(box);
   else append(box);
   problemBox = box;
+}
+
+/**
+ * The API key's field (TYTO-661). **The page stores the key in Tyto's keychain itself**
+ * (`storeCredential`, Tyto ADR 0134): it never goes to the plugin's process, which asks Tyto to
+ * send it with each request instead. The field is emptied as soon as Tyto has it.
+ */
+function keyForm() {
+  // Not a <form>: Tyto's panel frame is sandboxed without `allow-forms`, where a form's submit
+  // never fires. A button and Enter in the field do the same.
+  const row = element('div', 'choices key');
+  const field = element('input');
+  field.type = 'password';
+  field.autocomplete = 'off';
+  field.spellcheck = false;
+  field.placeholder = say().keyLabel;
+  field.setAttribute('aria-label', say().keyLabel);
+  const save = element('button', 'primary', say().saveKey);
+  row.append(field, save);
+  const store = async () => {
+    const key = field.value.trim();
+    if (key === '' || save.disabled) return;
+    save.disabled = true;
+    try {
+      await request('storeCredential', [API_KEY, key]);
+      field.value = '';
+      showStatus(await call('keySaved'));
+      shownProblem = null;
+      append(element('div', 'notice', say().keySaved));
+    } catch (cause) {
+      save.disabled = false;
+      append(element('div', 'notice', say().keyNotSaved(cause.message)));
+    }
+  };
+  save.addEventListener('click', () => void store());
+  field.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing) return;
+    event.preventDefault();
+    void store();
+  });
+  return row;
 }
 
 /** Starts the download the person accepted (TYTO-666); `poll` follows its progress. */
@@ -512,6 +589,9 @@ function show(entry) {
       );
       break;
     }
+    case 'usage':
+      append(element('div', 'meta usage', say().usage(entry)));
+      break;
     case 'end':
       currentReply = null;
       if (entry.reason !== 'end_turn') {
