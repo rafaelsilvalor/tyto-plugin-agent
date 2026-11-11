@@ -1,5 +1,7 @@
 import type { FormConfigurationContribution, PluginHost } from '@tyto/plugin-api';
 
+import { DEFAULT_AGENT_LINES } from './api/agents.js';
+
 /**
  * The agents this plugin can talk to. Each one is a program the manifest names as
  * `process:<program>` (Tyto ADR 0182): one more agent is one more row here and one more line the
@@ -123,13 +125,43 @@ export const DRIVERS: readonly Driver[] = [
   },
 ];
 
+/**
+ * The API-key driver (TYTO-661): not a program, so not a row of {@link DRIVERS}, but a value of
+ * the same `agent` setting.
+ */
+export const API_DRIVER = 'claude-api';
+
+/** The API driver's monthly cap when the person sets none, in US dollars. */
+export const DEFAULT_MONTHLY_CAP_USD = 10;
+
 export const SETTINGS: readonly FormConfigurationContribution[] = [
   {
     id: 'agent',
-    form: { type: 'string', enum: DRIVERS.map((driver) => driver.id) },
+    form: { type: 'string', enum: [...DRIVERS.map((driver) => driver.id), API_DRIVER] },
     default: 'claude',
     description: 'Which agent the panel talks to.',
-    options: DRIVERS.map((driver) => ({ value: driver.id, description: driver.label })),
+    options: [
+      ...DRIVERS.map((driver) => ({ value: driver.id, description: driver.label })),
+      {
+        value: API_DRIVER,
+        description:
+          'Claude API agents, with your own API key: billed per token to the key, separately from any subscription.',
+      },
+    ],
+  },
+  {
+    id: 'apiAgents',
+    form: { type: 'array', items: { type: 'string', minLength: 1 } },
+    default: [...DEFAULT_AGENT_LINES],
+    description:
+      'The Claude API agents, one per line: Name | model | effort | tools | instructions. Effort is low, medium, high, xhigh or max; tools is a comma-separated list of Tyto tools, * for all, or - for none.',
+  },
+  {
+    id: 'apiMonthlyCapUsd',
+    form: { type: 'number', minimum: 0 },
+    default: DEFAULT_MONTHLY_CAP_USD,
+    description:
+      'The most the Claude API agents may spend in a calendar month (UTC), in US dollars, as estimated from each call’s tokens. At the cap the panel starts no new turn.',
   },
   {
     id: 'args',
@@ -154,6 +186,29 @@ const RAW_RECORD = {
 export interface AgentChoice {
   readonly driver: Driver;
   readonly args: readonly string[];
+}
+
+/** Whether the settings name the API driver, read on every call. */
+export function usesApi(host: Pick<PluginHost, 'config'>): boolean {
+  const raw = host.config(RAW_RECORD) as { agent?: unknown } | undefined;
+  return raw?.agent === API_DRIVER;
+}
+
+/** The API driver's settings, read on every turn so a change applies to the next one. */
+export function apiSettings(host: Pick<PluginHost, 'config'>): {
+  agentLines: readonly string[];
+  monthlyCapUsd: number;
+} {
+  const raw = host.config(RAW_RECORD) as
+    { apiAgents?: unknown; apiMonthlyCapUsd?: unknown } | undefined;
+  const lines = Array.isArray(raw?.apiAgents)
+    ? raw.apiAgents.filter((line): line is string => typeof line === 'string')
+    : [...DEFAULT_AGENT_LINES];
+  const cap =
+    typeof raw?.apiMonthlyCapUsd === 'number' && Number.isFinite(raw.apiMonthlyCapUsd)
+      ? Math.max(0, raw.apiMonthlyCapUsd)
+      : DEFAULT_MONTHLY_CAP_USD;
+  return { agentLines: lines, monthlyCapUsd: cap };
 }
 
 /** The agent the settings name, read on every start so a change applies to the next one. */

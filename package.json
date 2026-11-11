@@ -24,9 +24,10 @@
     "check": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "1.7.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.6.2",
-    "@tyto/plugin-api": "npm:@rafaelsilvalor/tyto-plugin-api@^0.18.0",
+    "@tyto/plugin-api": "npm:@rafaelsilvalor/tyto-plugin-api@^0.19.0",
     "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.12.0",

@@ -60,9 +60,36 @@ export type Entry =
       readonly code?: NoticeCode;
       readonly params?: Readonly<Record<string, string>>;
     }
-  | { readonly seq: number; readonly kind: 'end'; readonly reason: string };
+  | { readonly seq: number; readonly kind: 'end'; readonly reason: string }
+  | ({ readonly seq: number; readonly kind: 'usage' } & TurnUsage);
 
-export type NoticeCode = 'agents-off' | 'ended' | 'not-started' | 'turn-failed';
+/**
+ * One API call's tokens and estimated cost (TYTO-661), and the month so far against the cap. Only
+ * the API driver reports it: a subscription has no per-token price.
+ */
+export interface TurnUsage {
+  readonly model: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  /** Dollars, as `dollars()` writes them. */
+  readonly cost: string;
+  readonly month: string;
+  readonly cap: string;
+}
+
+export type NoticeCode =
+  | 'agents-off'
+  | 'ended'
+  | 'not-started'
+  | 'turn-failed'
+  | 'cap-reached'
+  | 'no-tools'
+  | 'agent-lines'
+  | 'max-tokens'
+  | 'refused'
+  | 'tool-loop';
 
 export interface PermissionOption {
   readonly optionId: string;
@@ -87,7 +114,12 @@ export interface Problem {
     | 'no-programs'
     | 'exited'
     | 'failed'
-    | 'no-tools';
+    | 'no-tools'
+    | 'no-key'
+    | 'bad-key'
+    | 'no-api-agents'
+    | 'api-old-tyto'
+    | 'ledger';
   /** In English; the page says it in its language from `kind` and `params` when it knows it. */
   readonly message: string;
   readonly steps: readonly string[];
@@ -100,6 +132,11 @@ export interface Problem {
   readonly canLogIn?: boolean;
   /** For `not-downloaded`: the page offers **Download** (`download`). */
   readonly canDownload?: boolean;
+  /**
+   * For `no-key` and `bad-key`: the page offers a field for the API key, which it stores in
+   * Tyto's keychain itself (`storeCredential`), never through the plugin (TYTO-661).
+   */
+  readonly canEnterKey?: boolean;
 }
 
 /** One of the agent's terminal sign-ins: run the agent again with `args`, in a terminal. */
@@ -157,6 +194,9 @@ export interface Status {
   readonly problem: Problem | null;
   /** The folder the agent runs in, once it has started. */
   readonly folder: string | null;
+  /** The API driver's agents, for the page's picker, and the one this conversation uses. */
+  readonly agents?: readonly { readonly name: string; readonly model: string }[];
+  readonly agentName?: string;
 }
 
 /** At most this many entries per `read`, so one answer stays far below a panel call's 1 MiB. */

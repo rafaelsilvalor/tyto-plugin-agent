@@ -164,6 +164,24 @@
         user-select: all;
       }
       .permission .choices,
+      .key input {
+        flex: 1;
+        min-width: 0;
+        font: inherit;
+        color: inherit;
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 6px;
+      }
+      #pick {
+        font: inherit;
+        max-width: 50%;
+        color: inherit;
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
       .problem .choices {
         display: flex;
         flex-wrap: wrap;
@@ -284,6 +302,7 @@
   <body>
     <header>
       <strong id="agent">Agent</strong>
+      <select id="pick" hidden></select>
       <button id="reset">New</button>
     </header>
     <main id="log" aria-live="polite"></main>
