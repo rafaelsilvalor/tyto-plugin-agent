@@ -86,6 +86,8 @@ export interface FakeHost {
   readonly written: unknown[];
   /** Whether the plugin ever asked for a credential's value. */
   readonly credentialsRead: string[];
+  /** Every request the plugin asked the host to make, refused ones included. */
+  attempts(): number;
 }
 
 export interface FakeHostOptions {
@@ -109,8 +111,10 @@ export function fakeHost(options: FakeHostOptions): FakeHost {
   const records = options.records ?? new Map<string, string>();
   const answers = [...options.answers];
   const log = (line: string) => logged.push(line);
+  let attempted = 0;
 
   const fetch = (url: string, init: CredentialFetchInit = {}) => {
+    attempted += 1;
     const headers = { ...init.headers };
     if (init.credentialHeaders !== undefined) {
       for (const [header, key] of Object.entries(init.credentialHeaders)) {
@@ -210,5 +214,14 @@ export function fakeHost(options: FakeHostOptions): FakeHost {
         }),
   } as unknown as ApiHost;
 
-  return { host, sent, calls, logged, records, written, credentialsRead };
+  return {
+    host,
+    sent,
+    calls,
+    logged,
+    records,
+    written,
+    credentialsRead,
+    attempts: () => attempted,
+  };
 }

@@ -30,12 +30,17 @@ function settings(capUsd = 10, lines: readonly string[] = [AGENT]) {
 
 type Chat = ReturnType<typeof apiConversation>;
 
-/** Sends, then reads until the turn ends: the page's loop, without its timer. */
+/**
+ * Sends, then reads until the turn ends: the page's loop, without its timer. The deadline is by
+ * the clock, not a count of waits: a count of 5 ms waits is 1 s on Linux and about 3 s on
+ * Windows, whose timers fire every 15.6 ms (TYTO-661, red on CI only).
+ */
 async function turn(chat: Chat, text: string): Promise<{ entries: Entry[]; status: Status }> {
   const before = chat.read(0).entries.at(-1)?.seq ?? 0;
   const sent = chat.send(text);
   if (!sent.accepted) throw new Error(sent.reason);
-  for (let wait = 0; wait < 200; wait += 1) {
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline) {
     const read = chat.read(before);
     if (!read.status.busy) return { entries: [...read.entries], status: read.status };
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -146,10 +151,14 @@ describe('a conversation with an API agent', () => {
   it('asks for the key when none is stored, and when the API refuses it', async () => {
     const missing = fakeHost({ answers: [DONE], noKey: true });
     const chat = apiConversation(missing.host, { settings: settings(), now: () => NOW });
+    const started = Date.now();
     expect((await turn(chat, 'Hello')).status.problem).toMatchObject({
       kind: 'no-key',
       canEnterKey: true,
     });
+    // One request, not three: a refusal of the host's is not retried, so it is said at once.
+    expect(missing.attempts()).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1000);
     expect(chat.send('Again')).toMatchObject({ accepted: false });
     expect(chat.keySaved().problem).toBeNull();
 

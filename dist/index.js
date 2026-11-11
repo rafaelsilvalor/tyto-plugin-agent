@@ -73,6 +73,21 @@ function agentsOf(lines) {
 var API_KEY_CREDENTIAL = "anthropic-api-key";
 var PLACEHOLDER = "set-by-tyto-host";
 var NO_BODY = /* @__PURE__ */ new Set([101, 204, 205, 304]);
+var REFUSAL_HEADER = "x-tyto-refusal";
+function refusal(cause) {
+  const code = cause?.code;
+  if (typeof code !== "string" || !code.startsWith("E_")) return void 0;
+  const message = cause instanceof Error ? cause.message : code;
+  return new Response(JSON.stringify({ type: "error", error: { type: "tyto_refused", message } }), {
+    status: 403,
+    statusText: "Refused by Tyto",
+    headers: {
+      "content-type": "application/json",
+      "x-should-retry": "false",
+      [REFUSAL_HEADER]: code
+    }
+  });
+}
 function apiFetch(fetch) {
   return async (input, init) => {
     const request = new Request(input, init);
@@ -83,12 +98,19 @@ function apiFetch(fetch) {
     delete headers["x-api-key"];
     delete headers["authorization"];
     const body = init?.body === void 0 || init.body === null ? void 0 : await request.text();
-    const answer = await fetch(request.url, {
-      method: request.method,
-      headers,
-      ...body === void 0 ? {} : { body },
-      credentialHeaders: { "x-api-key": API_KEY_CREDENTIAL }
-    });
+    let answer;
+    try {
+      answer = await fetch(request.url, {
+        method: request.method,
+        headers,
+        ...body === void 0 ? {} : { body },
+        credentialHeaders: { "x-api-key": API_KEY_CREDENTIAL }
+      });
+    } catch (cause) {
+      const refused = refusal(cause);
+      if (refused !== void 0) return refused;
+      throw cause;
+    }
     return new Response(NO_BODY.has(answer.status) ? null : answer.body, {
       status: answer.status,
       statusText: answer.statusText,
@@ -134,6 +156,9 @@ var MAX_TOKENS = 16e3;
 var READ_LIMIT = 200;
 var TOOL_TEXT_LIMIT = 5e4;
 function codeIn(cause) {
+  const headers = cause?.headers;
+  const refused = typeof headers?.get === "function" ? headers.get(REFUSAL_HEADER) : null;
+  if (refused !== null && refused !== void 0) return refused;
   for (let at = cause, depth = 0; at !== void 0 && at !== null && depth < 5; depth += 1) {
     const code = at.code;
     if (typeof code === "string" && code.startsWith("E_")) return code;

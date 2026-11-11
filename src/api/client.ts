@@ -37,6 +37,30 @@ export type HostFetch = (
 /** Statuses whose response has no body, which `Response` refuses one for. */
 const NO_BODY = new Set([101, 204, 205, 304]);
 
+/** The header that carries the host's refusal code on the answer `apiFetch` makes of it. */
+export const REFUSAL_HEADER = 'x-tyto-refusal';
+
+/**
+ * The host's refusal (no key stored, a host the manifest does not name…), as an answer the SDK
+ * does not retry. A `fetch` that throws is a connection error to the SDK, which tries twice more
+ * with 0.5 s and 1 s of backoff: 1.1 to 1.5 s of waiting for a refusal that cannot change
+ * (measured in SDK 1.7.0's `makeRequest`, TYTO-661). The code rides on {@link REFUSAL_HEADER}.
+ */
+function refusal(cause: unknown): Response | undefined {
+  const code = (cause as { code?: unknown } | null)?.code;
+  if (typeof code !== 'string' || !code.startsWith('E_')) return undefined;
+  const message = cause instanceof Error ? cause.message : code;
+  return new Response(JSON.stringify({ type: 'error', error: { type: 'tyto_refused', message } }), {
+    status: 403,
+    statusText: 'Refused by Tyto',
+    headers: {
+      'content-type': 'application/json',
+      'x-should-retry': 'false',
+      [REFUSAL_HEADER]: code,
+    },
+  });
+}
+
 /** A `fetch` for the SDK, on the host's network, with the key added by the host. */
 export function apiFetch(fetch: HostFetch): typeof globalThis.fetch {
   return async (input, init) => {
@@ -48,12 +72,19 @@ export function apiFetch(fetch: HostFetch): typeof globalThis.fetch {
     delete headers['x-api-key'];
     delete headers['authorization'];
     const body = init?.body === undefined || init.body === null ? undefined : await request.text();
-    const answer = await fetch(request.url, {
-      method: request.method,
-      headers,
-      ...(body === undefined ? {} : { body }),
-      credentialHeaders: { 'x-api-key': API_KEY_CREDENTIAL },
-    });
+    let answer: Awaited<ReturnType<HostFetch>>;
+    try {
+      answer = await fetch(request.url, {
+        method: request.method,
+        headers,
+        ...(body === undefined ? {} : { body }),
+        credentialHeaders: { 'x-api-key': API_KEY_CREDENTIAL },
+      });
+    } catch (cause) {
+      const refused = refusal(cause);
+      if (refused !== undefined) return refused;
+      throw cause;
+    }
     return new Response(NO_BODY.has(answer.status) ? null : answer.body, {
       status: answer.status,
       statusText: answer.statusText,

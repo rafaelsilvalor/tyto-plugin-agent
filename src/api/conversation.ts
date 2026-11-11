@@ -3,7 +3,7 @@ import type { PluginHost } from '@tyto/plugin-api';
 
 import type { Conversation, Entry, Problem, Status } from '../conversation.js';
 import { type ApiAgent, agentsOf } from './agents.js';
-import { API_KEY_CREDENTIAL, type HostFetch, apiClient } from './client.js';
+import { API_KEY_CREDENTIAL, type HostFetch, REFUSAL_HEADER, apiClient } from './client.js';
 import { type Records, addSpent, monthOf, spentIn } from './ledger.js';
 import { PRICES, costMicros, dollars } from './prices.js';
 
@@ -67,6 +67,10 @@ const READ_LIMIT = 200;
 const TOOL_TEXT_LIMIT = 50_000;
 
 function codeIn(cause: unknown): string | undefined {
+  // A refusal of the host's that `apiFetch` turned into an answer the SDK does not retry.
+  const headers = (cause as { headers?: { get?(name: string): string | null } } | null)?.headers;
+  const refused = typeof headers?.get === 'function' ? headers.get(REFUSAL_HEADER) : null;
+  if (refused !== null && refused !== undefined) return refused;
   // The SDK wraps a refusal of the host's in its connection error: the code is on a cause.
   for (let at = cause, depth = 0; at !== undefined && at !== null && depth < 5; depth += 1) {
     const code = (at as { code?: unknown }).code;
