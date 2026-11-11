@@ -21,7 +21,7 @@ export const API_HOST = 'api.anthropic.com';
 /** What the SDK is told its key is. Never sent: `apiFetch` drops the header it lands in. */
 const PLACEHOLDER = 'set-by-tyto-host';
 
-/** `host.fetch` with the field Tyto 0.20 added; typed here so the plugin builds on 0.18's types. */
+/** `host.fetch` with the field the 0.19 contract added (`credentialHeaders`, Tyto ADR 0191). */
 export interface CredentialFetchInit {
   readonly method?: string;
   readonly headers?: Readonly<Record<string, string>>;

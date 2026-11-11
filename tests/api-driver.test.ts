@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 import { agentOf, agentsOf } from '../src/api/agents.js';
 import { apiConversation } from '../src/api/conversation.js';
@@ -12,6 +12,12 @@ import { SECRET, TOOLS, fakeHost, message } from './fake-api.js';
  * that calls a Tyto tool, the cost of each call, the monthly cap, the person's key and what never
  * leaves the host. See `fake-api.ts` for what the fake is and is not.
  */
+
+// The SDK is loaded once here, with time of its own: transforming it is seconds on a busy
+// machine, and the first turn of the first test would otherwise pay for it inside its 5 s.
+beforeAll(async () => {
+  await import('../src/vendor/anthropic-sdk.js');
+}, 60_000);
 
 const NOW = new Date('2026-11-11T12:00:00Z');
 const MONTH = ledgerKey('2026-11');

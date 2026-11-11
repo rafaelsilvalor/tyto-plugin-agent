@@ -155,9 +155,9 @@ function keyProblem(kind) {
 }
 var OLD_TYTO = {
   kind: "api-old-tyto",
-  message: "The API agents need Tyto 0.20 or later, which sends the key without the plugin holding it and keeps the month\u2019s spending. Update Tyto.",
+  message: "The API agents need Tyto 0.19 or later, which sends the key without the plugin holding it and keeps the month\u2019s spending. Update Tyto.",
   steps: [],
-  params: { version: "0.20" }
+  params: { version: "0.19" }
 };
 function toolsFor(agent, offered) {
   const allowed = offered.filter((tool) => agent.tools === "*" || agent.tools.includes(tool.name)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

@@ -91,7 +91,7 @@ export interface FakeHost {
 export interface FakeHostOptions {
   readonly answers: Answer[];
   readonly settings?: Record<string, unknown>;
-  /** No `storage`: a Tyto before 0.20. */
+  /** No `storage`: a Tyto before 0.19. */
   readonly oldTyto?: boolean;
   /** No window tools: a Tyto before 0.19. */
   readonly noTools?: boolean;

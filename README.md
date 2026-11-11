@@ -19,7 +19,7 @@ yet.
 Set `agent.agent` to `"claude-api"` and the panel talks to the Claude API directly, with **your
 own API key**: the route Anthropic's terms name for products built on Claude. No program runs,
 no MCP server is involved (so an organisation's MCP allowlist for Claude Code does not apply),
-and the agent gets Tyto's tools and nothing else. It needs Tyto 0.20 or later.
+and the agent gets Tyto's tools and nothing else. It needs Tyto 0.19 or later (the plugin's engine).
 
 - **The key stays in Tyto's keychain.** The panel asks for it once; the page stores it straight
   into Tyto's keychain (`credentials:anthropic-api-key`, Tyto ADR 0134) and empties the field.

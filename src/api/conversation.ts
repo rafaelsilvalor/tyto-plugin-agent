@@ -23,7 +23,7 @@ import { PRICES, costMicros, dollars } from './prices.js';
  * and refuses the next turn (`cap-reached`).
  */
 
-/** What the driver needs of the host: the 0.18 contract plus what Tyto 0.20 added, detected. */
+/** What the driver needs of the host: the 0.19 contract's storage and tools, still detected. */
 export type ApiHost = Pick<PluginHost, 'config' | 'log' | 'window'> & {
   readonly fetch: HostFetch;
   readonly storage?: Records & { delete(key: string): Promise<boolean> };
@@ -96,9 +96,9 @@ function keyProblem(kind: 'no-key' | 'bad-key'): Problem {
 const OLD_TYTO: Problem = {
   kind: 'api-old-tyto',
   message:
-    'The API agents need Tyto 0.20 or later, which sends the key without the plugin holding it and keeps the month’s spending. Update Tyto.',
+    'The API agents need Tyto 0.19 or later, which sends the key without the plugin holding it and keeps the month’s spending. Update Tyto.',
   steps: [],
-  params: { version: '0.20' },
+  params: { version: '0.19' },
 };
 
 /** The model's tools: the window's, those the agent may use, sorted so the prefix stays stable. */

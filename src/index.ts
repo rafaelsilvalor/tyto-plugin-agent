@@ -43,7 +43,7 @@ function stringOf(value: unknown): string {
  */
 export function activate(host: PluginHost): Disposable {
   const acp = conversation(host);
-  // The API driver (TYTO-661) reads what Tyto 0.20 added through the host as it finds it.
+  // The API driver (TYTO-661) reads what the 0.19 contract added through the host as it finds it.
   const api = apiConversation(host as unknown as ApiHost, { settings: () => apiSettings(host) });
   // Asked on every call: the `agent` setting can change while the panel is open.
   const pick = () => (usesApi(host) ? api : acp);
